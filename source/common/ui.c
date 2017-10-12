@@ -7,8 +7,10 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "qrcodegen.h"
 #include "font.h"
 #include "ui.h"
+#include "rtc.h"
 #include "timer.h"
 #include "hid.h"
 
@@ -18,7 +20,8 @@ void ClearScreen(u8* screen, int color)
 {
     int width = (screen == TOP_SCREEN) ? SCREEN_WIDTH_TOP : SCREEN_WIDTH_BOT;
     if (color == COLOR_TRANSPARENT) color = COLOR_BLACK;
-    for (int i = 0; i < (width * SCREEN_HEIGHT); i++) {
+    if (!color) memset(screen, 0x00, (width * SCREEN_HEIGHT * 3));
+    else for (int i = 0; i < (width * SCREEN_HEIGHT); i++) {
         *(screen++) = color >> 16;  // B
         *(screen++) = color >> 8;   // G
         *(screen++) = color & 0xFF; // R
@@ -53,9 +56,42 @@ void DrawBitmap(u8* screen, int x, int y, int w, int h, u8* bitmap)
         int xDisplacement = (x * BYTES_PER_PIXEL * SCREEN_HEIGHT);
         int yDisplacement = ((SCREEN_HEIGHT - (y + yy) - 1) * BYTES_PER_PIXEL);
         u8* screenPos = screen + xDisplacement + yDisplacement;
-        for (int xx = w - 1; xx >= 0; xx--) {
+        for (int xx = 0; xx < w; xx++) {
             memcpy(screenPos, bitmapPos, BYTES_PER_PIXEL);
             bitmapPos += BYTES_PER_PIXEL;
+            screenPos += BYTES_PER_PIXEL * SCREEN_HEIGHT;
+        }
+    }
+}
+
+void DrawQrCode(u8* screen, u8* qrcode)
+{
+    const u32 size_qr = qrcodegen_getSize(qrcode);
+    u32 size_qr_s = size_qr;
+    u32 size_canvas = size_qr + 8;
+    
+    // handle scaling
+    u32 scale = 1;
+    for (; size_canvas * (scale+1) < SCREEN_HEIGHT; scale++);
+    size_qr_s *= scale;
+    size_canvas *= scale;
+    
+    // clear screen, draw the canvas
+    u32 x_canvas = (SCREEN_WIDTH(screen) - size_canvas) / 2;
+    u32 y_canvas = (SCREEN_HEIGHT - size_canvas) / 2;
+    ClearScreen(screen, COLOR_STD_BG);
+    DrawRectangle(screen, x_canvas, y_canvas, size_canvas, size_canvas, COLOR_WHITE);
+    
+    // draw the QR code
+    u32 x_qr = (SCREEN_WIDTH(screen) - size_qr_s) / 2;
+    u32 y_qr = (SCREEN_HEIGHT - size_qr_s) / 2;
+    int xDisplacement = (x_qr * BYTES_PER_PIXEL * SCREEN_HEIGHT);
+    for (u32 y = 0; y < size_qr_s; y++) {
+        int yDisplacement = ((SCREEN_HEIGHT - (y_qr + y) - 1) * BYTES_PER_PIXEL);
+        u8* screenPos = screen + xDisplacement + yDisplacement;
+        for (u32 x = 0; x < size_qr_s; x++) {
+            u8 c = qrcodegen_getModule(qrcode, x/scale, y/scale) ? 0x00 : 0xFF;
+            memset(screenPos, c, BYTES_PER_PIXEL);
             screenPos += BYTES_PER_PIXEL * SCREEN_HEIGHT;
         }
     }
@@ -266,7 +302,7 @@ bool ShowPrompt(bool ask, const char *format, ...)
     DrawStringF(MAIN_SCREEN, x, y + str_height - (1*10), COLOR_STD_FONT, COLOR_STD_BG, (ask) ? "(<A> yes, <B> no)" : "(<A> to continue)");
     
     while (true) {
-        u32 pad_state = InputWait();
+        u32 pad_state = InputWait(0);
         if (pad_state & BUTTON_A) break;
         else if (pad_state & BUTTON_B) {
             ret = false;
@@ -341,7 +377,7 @@ bool ShowUnlockSequence(u32 seqlvl, const char *format, ...) {
         }
         if (lvl == len)
             break;
-        u32 pad_state = InputWait();
+        u32 pad_state = InputWait(0);
         if (!(pad_state & BUTTON_ANY))
             continue;
         else if (pad_state & sequences[seqlvl][lvl])
@@ -388,7 +424,7 @@ u32 ShowSelectPrompt(u32 n, const char** options, const char *format, ...) {
             DrawStringF(MAIN_SCREEN, x, yopt + (12*i), (sel == i) ? COLOR_STD_FONT : COLOR_LIGHTGREY, COLOR_STD_BG, "%2.2s %s",
                 (sel == i) ? "->" : "", options[i]);
         }
-        u32 pad_state = InputWait();
+        u32 pad_state = InputWait(0);
         if (pad_state & BUTTON_DOWN) sel = (sel+1) % n;
         else if (pad_state & BUTTON_UP) sel = (sel+n-1) % n;
         else if (pad_state & BUTTON_A) break;
@@ -460,7 +496,7 @@ bool ShowInputPrompt(char* inputstr, u32 max_size, u32 resize, const char* alpha
         if (cursor_a < 0) {
             for (cursor_a = alphabet_size - 1; (cursor_a > 0) && (alphabet[cursor_a] != inputstr[cursor_s]); cursor_a--);
         }
-        u32 pad_state = InputWait();
+        u32 pad_state = InputWait(0);
         if (pad_state & BUTTON_A) {
             ret = true;
             break;
@@ -598,6 +634,76 @@ bool ShowDataPrompt(u8* data, u32* size, const char *format, ...) {
     return ret; 
 }
 
+
+bool ShowRtcSetterPrompt(void* time, const char *format, ...) {
+    DsTime* dstime = (DsTime*) time;
+    u32 str_width, str_height;
+    u32 x, y;
+    
+    char str[STRBUF_SIZE] = { 0 };
+    va_list va;
+    va_start(va, format);
+    vsnprintf(str, STRBUF_SIZE, format, va);
+    va_end(va);
+    
+    // check the initial time
+    if (!is_valid_dstime(dstime)) {
+        dstime->bcd_h = dstime->bcd_m = dstime->bcd_s = 0x00;
+        dstime->bcd_D = dstime->bcd_M = 0x01;
+        dstime->bcd_Y = 0x00;
+    }
+    
+    str_width = GetDrawStringWidth(str);
+    str_height = GetDrawStringHeight(str) + (4*10);
+    if (str_width < (19 * FONT_WIDTH)) str_width = 19 * FONT_WIDTH;
+    x = (str_width >= SCREEN_WIDTH_MAIN) ? 0 : (SCREEN_WIDTH_MAIN - str_width) / 2;
+    y = (str_height >= SCREEN_HEIGHT) ? 0 : (SCREEN_HEIGHT - str_height) / 2;
+    
+    ClearScreenF(true, false, COLOR_STD_BG);
+    DrawStringF(MAIN_SCREEN, x, y, COLOR_STD_FONT, COLOR_STD_BG, str);
+    
+    int cursor = 0;
+    bool ret = false;
+    while (true) {
+        static const int val_max[] = { 99, 12, 31, 23, 59, 59 };
+        static const int val_min[] = {  0,  1,  1,  0,  0,  0 };
+        u8* bcd = &(((u8*)dstime)[(cursor<3) ? (6-cursor) : (6-1-cursor)]);
+        int val = BCD2NUM(*bcd);
+        int max = val_max[cursor];
+        int min = val_min[cursor];
+        DrawStringF(MAIN_SCREEN, x, y + str_height - 28, COLOR_STD_FONT, COLOR_STD_BG, "YYYY-MM-DD hh:mm:ss");
+        DrawStringF(MAIN_SCREEN, x, y + str_height - 18, COLOR_STD_FONT, COLOR_STD_BG, "20%02lX-%02lX-%02lX %02lX:%02lX:%02lX\n  %-*.*s^^%-*.*s",
+            (u32) dstime->bcd_Y, (u32) dstime->bcd_M, (u32) dstime->bcd_D, (u32) dstime->bcd_h, (u32) dstime->bcd_m, (u32) dstime->bcd_s,
+            cursor * 3, cursor * 3, "", 17 - 2 - (cursor * 3), 17 - 2 - (cursor * 3), "");
+            
+        // user input
+        u32 pad_state = InputWait(0);
+        if ((pad_state & BUTTON_A) && is_valid_dstime(dstime)) {
+            ret = true;
+            break;
+        } else if (pad_state & BUTTON_B) {
+            break;
+        } else if (pad_state & BUTTON_UP) {
+            val += (pad_state & BUTTON_R1) ? 10 : 1;
+            if (val > max) val = max;
+        } else if (pad_state & BUTTON_DOWN) {
+            val -= (pad_state & BUTTON_R1) ? 10 : 1;
+            if (val < min) val = min;
+        } else if (pad_state & BUTTON_LEFT) {
+            if (--cursor < 0) cursor = 5;
+        } else if (pad_state & BUTTON_RIGHT) {
+            if (++cursor > 5) cursor = 0;
+        }
+        
+        // update bcd
+        *bcd = NUM2BCD(val);
+    }
+    
+    ClearScreenF(true, false, COLOR_STD_BG);
+    
+    return ret;
+}
+
 bool ShowProgress(u64 current, u64 total, const char* opstr)
 {
     static u32 last_prog_width = 0;
@@ -629,6 +735,7 @@ bool ShowProgress(u64 current, u64 total, const char* opstr)
         DrawRectangle(MAIN_SCREEN, bar_pos_x + 1, bar_pos_y + 1, bar_width - 2, bar_height - 2, COLOR_STD_BG);
     }
     DrawRectangle(MAIN_SCREEN, bar_pos_x + 2, bar_pos_y + 2, prog_width, bar_height - 4, COLOR_STD_FONT);
+    DrawRectangle(MAIN_SCREEN, bar_pos_x + 2 + prog_width, bar_pos_y + 2, (bar_width-4) - prog_width, bar_height - 4, COLOR_STD_BG);
     
     TruncateString(progstr, opstr, (bar_width / FONT_WIDTH_EXT) - 7, 8);
     snprintf(tempstr, 64, "%s (%lu%%)", progstr, prog_percent);

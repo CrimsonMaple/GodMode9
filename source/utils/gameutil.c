@@ -121,7 +121,7 @@ u32 LoadCiaStub(CiaStub* stub, const char* path) {
     return 0;
 }
 
-u32 LoadExeFsFile(void* data, const char* path, u32 offset, const char* name, u32 size_max) {
+u32 LoadExeFsFile(void* data, const char* path, u32 offset, const char* name, u32 size_max, u32* bytes_read) {
     NcchHeader ncch;
     ExeFsHeader exefs;
     FIL file;
@@ -161,6 +161,7 @@ u32 LoadExeFsFile(void* data, const char* path, u32 offset, const char* name, u3
         }
     } else ret = 1;
     
+    if (bytes_read) *bytes_read = btr;
     fvx_close(&file);
     return ret;
 }
@@ -172,7 +173,7 @@ u32 LoadNcchMeta(CiaMeta* meta, const char* path, u64 offset) {
     // get dependencies from exthdr, icon from exeFS
     if ((LoadNcchHeaders(&ncch, &exthdr, NULL, path, offset) != 0) ||
         (BuildCiaMeta(meta, &exthdr, NULL) != 0) ||
-        (LoadExeFsFile(meta->smdh, path, offset, "icon", sizeof(meta->smdh))))
+        (LoadExeFsFile(meta->smdh, path, offset, "icon", sizeof(meta->smdh), NULL)))
         return 1;
         
     return 0;
@@ -842,6 +843,14 @@ u32 CryptCiaFile(const char* orig, const char* dest, u16 crypto) {
         next_offset += size;
     }
     
+    // if not inplace: take over CIA metadata
+    if (!inplace && (info.size_meta == CIA_META_SIZE)) {
+        CiaMeta* meta = (CiaMeta*) (void*) (cia + 1);
+        if ((fvx_qread(orig, meta, info.offset_meta, CIA_META_SIZE, NULL) != FR_OK) ||
+            (fvx_qwrite(dest, meta, info.offset_meta, CIA_META_SIZE, NULL) != FR_OK))
+            return 1;
+    }
+    
     // fix TMD hashes, write CIA stub to destination
     if ((FixTmdHashes(&(cia->tmd)) != 0) ||
         (WriteCiaStub(cia, dest) != 0)) return 1;
@@ -899,6 +908,7 @@ u32 DecryptFirmFile(const char* orig, const char* dest) {
     // write back FIRM header
     fvx_lseek(&file, 0);
     memcpy(firm.dec_magic, dec_magic, sizeof(dec_magic));
+    firm.entry_arm9 = ARM9ENTRY_FIX(&firm);
     if (fvx_write(&file, &firm, sizeof(FirmHeader), &btr) != FR_OK) {
         fvx_close(&file);
         return 1;
@@ -1256,7 +1266,7 @@ u32 BuildCiaFromNcchFile(const char* path_ncch, const char* path_cia) {
     // optional stuff (proper titlekey / meta data)
     FindTitleKey((&cia->ticket), title_id);
     if (exthdr && (BuildCiaMeta(meta, exthdr, NULL) == 0) &&
-        (LoadExeFsFile(meta->smdh, path_ncch, 0, "icon", sizeof(meta->smdh)) == 0) &&
+        (LoadExeFsFile(meta->smdh, path_ncch, 0, "icon", sizeof(meta->smdh), NULL) == 0) &&
         (InsertCiaMeta(path_cia, meta) == 0))
         cia->header.size_meta = CIA_META_SIZE;
     
@@ -1321,7 +1331,7 @@ u32 BuildCiaFromNcsdFile(const char* path_ncsd, const char* path_cia) {
     // optional stuff (proper titlekey / meta data)
     FindTitleKey(&(cia->ticket), title_id);
     if ((BuildCiaMeta(meta, exthdr, NULL) == 0) &&
-        (LoadExeFsFile(meta->smdh, path_ncsd, NCSD_CNT0_OFFSET, "icon", sizeof(meta->smdh)) == 0) &&
+        (LoadExeFsFile(meta->smdh, path_ncsd, NCSD_CNT0_OFFSET, "icon", sizeof(meta->smdh), NULL) == 0) &&
         (InsertCiaMeta(path_cia, meta) == 0))
         cia->header.size_meta = CIA_META_SIZE;
     
@@ -1385,6 +1395,7 @@ u32 DumpCxiSrlFromTmdFile(const char* path) {
     // prepare output name
     snprintf(dest, 256, OUTPUT_PATH "/");
     char* dname = dest + strnlen(dest, 256);
+    if (!CheckWritePermissions(dest)) return 1;
     
     // ensure the output dir exists
     if (fvx_rmkdir(OUTPUT_PATH) != FR_OK)
@@ -1401,6 +1412,42 @@ u32 DumpCxiSrlFromTmdFile(const char* path) {
     return 0;
 }
 
+u32 ExtractCodeFromCxiFile(const char* path, const char* path_out) {
+    u8* code = (u8*) TEMP_BUFFER;
+    u32 code_max_size = TEMP_BUFFER_EXTSIZE; // uses the extended temp buffer size
+    
+    NcchHeader ncch;
+    NcchExtHeader exthdr;
+    
+    // load ncch, exthdr, .code
+    u32 code_size;
+    if ((LoadNcchHeaders(&ncch, &exthdr, NULL, path, 0) != 0) ||
+        (LoadExeFsFile(code, path, 0, EXEFS_CODE_NAME, code_max_size, &code_size)))
+        return 1;
+    
+    // decompress code (only if required)
+    if ((exthdr.flag & 0x1) && (DecompressCodeLzss(code, &code_size, code_max_size) != 0))
+        return 1;
+    
+    // build or take over output path
+    char dest[256];
+    if (!path_out) {
+        // ensure the output dir exists
+        if (fvx_rmkdir(OUTPUT_PATH) != FR_OK) return 1;
+        snprintf(dest, 256, OUTPUT_PATH "/%016llX%s%s", ncch.programId, (exthdr.flag & 0x1) ? ".dec" : "", EXEFS_CODE_NAME);
+    } else strncpy(dest, path_out, 256);
+    if (!CheckWritePermissions(dest)) return 1;
+    
+    // write output file
+    fvx_unlink(dest);
+    if (fvx_qwrite(dest, code, 0, code_size, NULL) != FR_OK) {
+        fvx_unlink(dest);
+        return 1;
+    }
+        
+    return 0;
+}
+
 u32 LoadSmdhFromGameFile(const char* path, Smdh* smdh) {
     u32 filetype = IdentifyFileType(path);
     
@@ -1408,9 +1455,9 @@ u32 LoadSmdhFromGameFile(const char* path, Smdh* smdh) {
         UINT btr;
         if ((fvx_qread(path, smdh, 0, sizeof(Smdh), &btr) == FR_OK) || (btr == sizeof(Smdh))) return 0;
     } else if (filetype & GAME_NCCH) { // NCCH file
-        if (LoadExeFsFile(smdh, path, 0, "icon", sizeof(Smdh)) == 0) return 0;
+        if (LoadExeFsFile(smdh, path, 0, "icon", sizeof(Smdh), NULL) == 0) return 0;
     } else if (filetype & GAME_NCSD) { // NCSD file
-        if (LoadExeFsFile(smdh, path, NCSD_CNT0_OFFSET, "icon", sizeof(Smdh)) == 0) return 0;
+        if (LoadExeFsFile(smdh, path, NCSD_CNT0_OFFSET, "icon", sizeof(Smdh), NULL) == 0) return 0;
     } else if (filetype & GAME_CIA) { // CIA file
         CiaInfo info;
         UINT btr;
@@ -1419,7 +1466,7 @@ u32 LoadSmdhFromGameFile(const char* path, Smdh* smdh) {
             (GetCiaInfo(&info, (CiaHeader*) &info) != 0)) return 1;
         if ((info.offset_meta) && (fvx_qread(path, smdh, info.offset_meta + 0x400, sizeof(Smdh), &btr) == FR_OK) &&
             (btr == sizeof(Smdh))) return 0;
-        else if (LoadExeFsFile(smdh, path, info.offset_content, "icon", sizeof(Smdh)) == 0) return 0;
+        else if (LoadExeFsFile(smdh, path, info.offset_content, "icon", sizeof(Smdh), NULL) == 0) return 0;
     } else if (filetype & GAME_TMD) {
         char path_content[256];
         if (GetTmdContentPath(path_content, path) != 0) return 1;
@@ -1444,7 +1491,7 @@ u32 ShowSmdhTitleInfo(Smdh* smdh) {
     WordWrapString(desc_s, lwrap);
     WordWrapString(pub, lwrap);
     ShowIconString(icon, SMDH_DIM_ICON_BIG, SMDH_DIM_ICON_BIG, "%s\n%s\n%s", desc_l, desc_s, pub);
-    InputWait();
+    InputWait(0);
     ClearScreenF(true, false, COLOR_STD_BG);
     return 0;
 }
@@ -1460,7 +1507,7 @@ u32 ShowNdsFileTitleInfo(const char* path) {
         return 1;
     WordWrapString(desc, lwrap);
     ShowIconString(icon, TWLICON_DIM_ICON, TWLICON_DIM_ICON, "%s", desc);
-    InputWait();
+    InputWait(0);
     ClearScreenF(true, false, COLOR_STD_BG);
     return 0;
     
@@ -1925,11 +1972,11 @@ u32 GetGoodName(char* name, const char* path, bool quick) {
                 char region[8] = { 0 };
                 if (twl->region_flags == TWL_REGION_FREE) snprintf(region, 8, "W");
                 snprintf(region, 8, "%s%s%s%s%s",
-                    (twl->region_flags & TWL_REGION_JAP) ? "J" : "",
-                    (twl->region_flags & TWL_REGION_USA) ? "U" : "",
-                    (twl->region_flags & TWL_REGION_EUR) ? "E" : "",
-                    (twl->region_flags & TWL_REGION_CHN) ? "C" : "",
-                    (twl->region_flags & TWL_REGION_KOR) ? "K" : "");
+                    (twl->region_flags & REGION_MASK_JPN) ? "J" : "",
+                    (twl->region_flags & REGION_MASK_USA) ? "U" : "",
+                    (twl->region_flags & REGION_MASK_EUR) ? "E" : "",
+                    (twl->region_flags & REGION_MASK_CHN) ? "C" : "",
+                    (twl->region_flags & REGION_MASK_KOR) ? "K" : "");
                 if (strncmp(region, "JUECK", 8) == 0) snprintf(region, 8, "W");
                 if (!*region) snprintf(region, 8, "UNK");
                 
@@ -1953,12 +2000,12 @@ u32 GetGoodName(char* name, const char* path, bool quick) {
             char region[8] = { 0 };
             if (smdh->region_lockout == SMDH_REGION_FREE) snprintf(region, 8, "W");
             snprintf(region, 8, "%s%s%s%s%s%s",
-                (smdh->region_lockout & SMDH_REGION_JAP) ? "J" : "",
-                (smdh->region_lockout & SMDH_REGION_USA) ? "U" : "",
-                (smdh->region_lockout & SMDH_REGION_EUR) ? "E" : "",
-                (smdh->region_lockout & SMDH_REGION_CHN) ? "C" : "",
-                (smdh->region_lockout & SMDH_REGION_KOR) ? "K" : "",
-                (smdh->region_lockout & SMDH_REGION_TWN) ? "T" : "");
+                (smdh->region_lockout & REGION_MASK_JPN) ? "J" : "",
+                (smdh->region_lockout & REGION_MASK_USA) ? "U" : "",
+                (smdh->region_lockout & REGION_MASK_EUR) ? "E" : "",
+                (smdh->region_lockout & REGION_MASK_CHN) ? "C" : "",
+                (smdh->region_lockout & REGION_MASK_KOR) ? "K" : "",
+                (smdh->region_lockout & REGION_MASK_TWN) ? "T" : "");
             if (strncmp(region, "JUECKT", 8) == 0) snprintf(region, 8, "W");
             if (!*region) snprintf(region, 8, "UNK");
             

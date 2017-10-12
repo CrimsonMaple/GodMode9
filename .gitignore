@@ -36,4 +36,10 @@
 /build
 /output
 /release
+
+# User additions
+/data/aeskeydb.bin
+/data/aeskeydb_.bin
+/data/vram0.img
+/data/vram0_.img
 /zzz_backup

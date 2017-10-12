@@ -1,28 +1,26 @@
-#include "common.h"
 #include "godmode.h"
-#include "ui.h"
-#include "i2c.h"
 #include "power.h"
-
-u8 *top_screen, *bottom_screen;
+#include "pxi.h"
+#include "i2c.h"
 
 void main(int argc, char** argv)
 {
-    // Turn on backlight
+    (void) argv; // unused for now
+
+    // Wait for ARM11
+    PXI_WaitRemote(PXI_READY);
+
+    PXI_DoCMD(PXI_SCREENINIT, NULL, 0);
     I2C_writeReg(I2C_DEV_MCU, 0x22, 0x2A);
-    
-    // Fetch the framebuffer addresses
-    if(argc >= 2) {
-        // newer entrypoints
-        u8 **fb = (u8 **)(void *)argv[1];
-        top_screen = fb[0];
-        bottom_screen = fb[2];
-    } else {
-        // outdated entrypoints
-        top_screen = (u8*)(*(u32*)0x23FFFE00);
-        bottom_screen = (u8*)(*(u32*)0x23FFFE08);
-    }
-    
+
+    #ifdef AUTORUN_SCRIPT
+    // Run the script runner
+    if (ScriptRunner(argc) == GODMODE_EXIT_REBOOT)
+    #else
     // Run the main program
-    (GodMode() == GODMODE_EXIT_REBOOT) ? Reboot() : PowerOff();
+    if (GodMode(argc) == GODMODE_EXIT_REBOOT)
+    #endif
+        Reboot();
+
+    PowerOff();
 }

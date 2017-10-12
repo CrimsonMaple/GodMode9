@@ -92,7 +92,8 @@ bool GetRootDirContentsWorker(DirStruct* contents) {
                 (GetMountState() & GAME_NCCH ) ? "NCCH"  :
                 (GetMountState() & GAME_EXEFS) ? "EXEFS" :
                 (GetMountState() & GAME_ROMFS) ? "ROMFS" :
-                (GetMountState() & SYS_FIRM)   ? "FIRM" : "UNK", drvname[i]);
+                (GetMountState() & GAME_NDS)   ? "NDS"   :
+                (GetMountState() & SYS_FIRM)   ? "FIRM"  : "UNK", drvname[i]);
         else snprintf(entry->path + 4, 32, "[%s] %s", drvnum[i], drvname[i]);
         entry->name = entry->path + 4;
         entry->size = GetTotalSpace(entry->path);
@@ -173,7 +174,7 @@ void SearchDirContents(DirStruct* contents, const char* path, const char* patter
 }
 
 void GetDirContents(DirStruct* contents, const char* path) {
-    if (*search_path && DriveType(path) & DRV_SEARCH) {
+    if (*search_path && (DriveType(path) & DRV_SEARCH)) {
         ShowString("Searching, please wait...");
         SearchDirContents(contents, search_path, search_pattern, true);
         if (search_title_mode) SetDirGoodNames(contents);
@@ -195,13 +196,13 @@ uint64_t GetFreeSpace(const char* path)
     if (f_getfree(fsname, &free_clusters, &fsptr) != FR_OK)
         return 0;
 
-    return (uint64_t) free_clusters * fsobj->csize * _MAX_SS;
+    return (uint64_t) free_clusters * fsobj->csize * FF_MAX_SS;
 }
 
 uint64_t GetTotalSpace(const char* path)
 {
     FATFS* fsobj = GetMountedFSObject(path);
-    return (fsobj) ? ((uint64_t) (fsobj->n_fatent - 2) * fsobj->csize * _MAX_SS) :
+    return (fsobj) ? ((uint64_t) (fsobj->n_fatent - 2) * fsobj->csize * FF_MAX_SS) :
         GetVirtualDriveSize(path);
 }
 

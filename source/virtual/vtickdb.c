@@ -15,7 +15,7 @@ typedef struct {
     u8  title_id[8];
     u8  titlekey[16];
     u8  ticket_id[8];
-	u8  console_id[4];
+    u8  console_id[4];
     u8  eshop_id[4];
 } __attribute__((packed)) TickDbEntry;
 
@@ -52,7 +52,7 @@ u32 AddTickDbInfo(TickDbInfo* info, Ticket* ticket, u32 offset) {
     for (; t < info->n_entries; t++) {
         TickDbEntry* entry0 = info->entries + t;
         if (memcmp(entry->title_id, entry0->title_id, 8) != 0) continue;
-        if (!getbe64(entry0->console_id)) // replace this
+        if (!getbe32(entry0->console_id)) // replace this
             memcpy(entry0, entry, sizeof(TickDbEntry));
         break;
     }
@@ -113,7 +113,7 @@ bool ReadVTickDbDir(VirtualFile* vfile, VirtualDir* vdir) {
             vfile->offset = tick_entry->offset;
             vfile->size = sizeof(Ticket);
             vfile->keyslot = 0xFF;
-            vfile->flags = vdir->flags & ~VFLAG_DIR;
+            vfile->flags = (vdir->flags | VFLAG_READONLY) & ~VFLAG_DIR;
             
             return true; // found
         }
@@ -123,6 +123,7 @@ bool ReadVTickDbDir(VirtualFile* vfile, VirtualDir* vdir) {
         while (++vdir->index < n_templates) {
             // copy current template to vfile
             memcpy(vfile, templates + vdir->index, sizeof(VirtualFile));
+            vfile->flags |= VFLAG_READONLY;
             return true; // found
         }
     }

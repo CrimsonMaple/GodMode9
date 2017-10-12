@@ -1,10 +1,11 @@
 #pragma once
 
 #include "common.h"
+#include "region.h"
 
 // size of the icon struct:
 // see: http://problemkaputt.de/gbatek.htm#dscartridgeicontitle
-// v0x0001 -> 0x0840 byte (contains JAP, USA, FRE, GER, ITA, ESP titles)
+// v0x0001 -> 0x0840 byte (contains JPN, USA, FRE, GER, ITA, ESP titles)
 // v0x0002 -> 0x0940 byte (adds CHN title)
 // v0x0003 -> 0x0A40 byte (adds KOR title) 
 // v0x0103 -> 0x23C0 byte (adds TWL animated icon data)
@@ -18,14 +19,6 @@
 #define TWL_UNITCODE_NTR    0x00
 #define TWL_UNITCODE_TWLNTR 0x02
 #define TWL_UNITCODE_TWL    0x03
-
-#define TWL_REGION_JAP      0x01
-#define TWL_REGION_USA      0x02
-#define TWL_REGION_EUR      0x04
-#define TWL_REGION_AUS      0x08
-#define TWL_REGION_CHN      0x10
-#define TWL_REGION_KOR      0x20
-#define TWL_REGION_FREE     0xFFFFFFFF
 
 // see: http://problemkaputt.de/gbatek.htm#dscartridgeicontitle
 typedef struct {
@@ -69,26 +62,26 @@ typedef struct {
     u8  rom_version;
     u8  autostart; // bit2: skip "press button" after Health & Safety
     u32 arm9_rom_offset;
-	u32 arm9_entry_address;
-	u32 arm9_ram_address;
-	u32 arm9_size;
-	u32 arm7_rom_offset;
-	u32 arm7_entry_address;
-	u32 arm7_ram_address;
-	u32 arm7_size;
+    u32 arm9_entry_address;
+    u32 arm9_ram_address;
+    u32 arm9_size;
+    u32 arm7_rom_offset;
+    u32 arm7_entry_address;
+    u32 arm7_ram_address;
+    u32 arm7_size;
     u32 fnt_offset;
     u32 fnt_size;
     u32 fat_offset;
     u32 fat_size;
     u32 arm9_overlay_offset;
-	u32 arm9_overlay_size;
-	u32 arm7_overlay_offset;
-	u32 arm7_overlay_size;
-	u32 rom_control_normal; // 0x00416657 for OneTimePROM
-	u32 rom_control_key1; // 0x081808F8 for OneTimePROM
-	u32 icon_offset;
-	u16 secure_area_crc;
-	u16 secure_area_delay;
+    u32 arm9_overlay_size;
+    u32 arm7_overlay_offset;
+    u32 arm7_overlay_size;
+    u32 rom_control_normal; // 0x00416657 for OneTimePROM
+    u32 rom_control_key1; // 0x081808F8 for OneTimePROM
+    u32 icon_offset;
+    u16 secure_area_crc;
+    u16 secure_area_delay;
     u32 arm9_auto_load;
     u32 arm7_auto_load;
     u64 secure_area_disable;
@@ -127,3 +120,7 @@ u32 ValidateTwlHeader(TwlHeader* twl);
 u32 LoadTwlMetaData(const char* path, TwlHeader* hdr, TwlIconData* icon);
 u32 GetTwlTitle(char* desc, const TwlIconData* twl_icon);
 u32 GetTwlIcon(u8* icon, const TwlIconData* twl_icon);
+
+u32 FindNitroRomDir(u32 dirid, u32* fileid, u8** fnt_entry, TwlHeader* hdr, u8* fnt, u8* fat);
+u32 NextNitroRomEntry(u32* fileid, u8** fnt_entry);
+u32 ReadNitroRomEntry(u64* offset, u64* size, bool* is_dir, u32 fileid, u8* fnt_entry, u8* fat);

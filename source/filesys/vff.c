@@ -3,14 +3,14 @@
 #include "ffconf.h"
 #include "vff.h"
 
-#if _USE_LFN != 0
-#define _MAX_FN_LEN (_MAX_LFN)
+#if FF_USE_LFN != 0
+#define _MAX_FN_LEN (FF_MAX_LFN)
 #else
 #define _MAX_FN_LEN (8+3)
 #endif
     
 #define _VFIL_ENABLED    (!_FS_TINY)
-#define _VDIR_ENABLED    ((sizeof(DIR) - sizeof(_FDID) >= sizeof(VirtualDir)) && (_USE_LFN != 0))
+#define _VDIR_ENABLED    ((sizeof(DIR) - sizeof(FFOBJID) >= sizeof(VirtualDir)) && (FF_USE_LFN != 0))
 
 #define VFIL(fp) ((VirtualFile*) (void*) fp->buf)
 #define VDIR(dp) ((VirtualDir*) (void*) &(dp->dptr))
@@ -63,8 +63,10 @@ FRESULT fvx_close (FIL* fp) {
 FRESULT fvx_lseek (FIL* fp, FSIZE_t ofs) {
     #if _VFIL_ENABLED
     if (fp->obj.fs == NULL) {
-        fp->fptr = ofs;
-        return FR_OK;
+        if (fvx_size(fp) >= ofs) {
+            fp->fptr = ofs;
+            return FR_OK;
+        } else return FR_DENIED;
     }
     #endif
     return f_lseek( fp, ofs );
@@ -83,10 +85,11 @@ FRESULT fvx_stat (const TCHAR* path, FILINFO* fno) {
         if (!GetVirtualFile(&vfile, path)) return FR_NO_PATH;
         if (fno) {
             fno->fsize = vfile.size;
-            fno->fdate = fno->ftime = 0;
+            fno->fdate = (1<<5)|(1<<0); // 1 for month / day
+            fno->ftime = 0;
             fno->fattrib = (vfile.flags & VFLAG_DIR) ? (AM_DIR|AM_VRT) : AM_VRT;
             // could be better...
-            if (_USE_LFN != 0) GetVirtualFilename(fno->fname, &vfile, _MAX_LFN + 1);
+            if (FF_USE_LFN != 0) GetVirtualFilename(fno->fname, &vfile, FF_MAX_LFN + 1);
         }
         return FR_OK;
     } else return fa_stat( path, fno );
@@ -98,8 +101,12 @@ FRESULT fvx_rename (const TCHAR* path_old, const TCHAR* path_new) {
 }
 
 FRESULT fvx_unlink (const TCHAR* path) {
-    if (GetVirtualSource(path)) return FR_DENIED;
-    return fa_unlink( path );
+    if (GetVirtualSource(path)) {
+        VirtualFile vfile;
+        if (!GetVirtualFile(&vfile, path)) return FR_NO_PATH;
+        if (DeleteVirtualFile(&vfile) != 0) return FR_DENIED;
+        return FR_OK;
+    } else return fa_unlink( path );
 }
 
 FRESULT fvx_mkdir (const TCHAR* path) {
@@ -133,7 +140,7 @@ FRESULT fvx_readdir (DIR* dp, FILINFO* fno) {
                 fno->fsize = vfile.size;
                 fno->fdate = fno->ftime = 0;
                 fno->fattrib = (vfile.flags & VFLAG_DIR) ? (AM_DIR|AM_VRT) : AM_VRT;
-                GetVirtualFilename(fno->fname, &vfile, _MAX_LFN + 1);
+                GetVirtualFilename(fno->fname, &vfile, FF_MAX_LFN + 1);
             } else *(fno->fname) = 0;
             return FR_OK;
         }
@@ -234,7 +241,7 @@ FRESULT worker_fvx_runlink (TCHAR* tpath) {
     FRESULT res;
     
     // this code handles directory content deletion
-    if ((res = fa_stat(tpath, &fno)) != FR_OK) return res; // tpath does not exist
+    if ((res = fvx_stat(tpath, &fno)) != FR_OK) return res; // tpath does not exist
     if (fno.fattrib & AM_DIR) { // process folder contents
         DIR pdir;
         TCHAR* fname = tpath + strnlen(tpath, 255);
@@ -243,7 +250,7 @@ FRESULT worker_fvx_runlink (TCHAR* tpath) {
         if ((res = fa_opendir(&pdir, tpath)) != FR_OK) return res;
         *(fname++) = '/';
         
-        while (f_readdir(&pdir, &fno) == FR_OK) {
+        while (fvx_readdir(&pdir, &fno) == FR_OK) {
             if ((strncmp(fno.fname, ".", 2) == 0) || (strncmp(fno.fname, "..", 3) == 0))
                 continue; // filter out virtual entries
             strncpy(fname, fno.fname, tpath + 255 - fname);
@@ -253,11 +260,11 @@ FRESULT worker_fvx_runlink (TCHAR* tpath) {
                 worker_fvx_runlink(tpath);
             }
         }
-        f_closedir(&pdir);
+        fvx_closedir(&pdir);
         *(--fname) = '\0';
     }
     
-    return fa_unlink( tpath );
+    return fvx_unlink( tpath );
 }
 #endif
 
@@ -306,7 +313,7 @@ FRESULT fvx_preaddir (DIR* dp, FILINFO* fno, const TCHAR* pattern) {
     return res;
 }
 
-FRESULT fvx_findpath (TCHAR* path, const TCHAR* pattern) {
+FRESULT fvx_findpath (TCHAR* path, const TCHAR* pattern, BYTE mode) {
     strncpy(path, pattern, _MAX_FN_LEN);
     TCHAR* fname = strrchr(path, '/');
     if (!fname) return FR_DENIED;
@@ -320,14 +327,19 @@ FRESULT fvx_findpath (TCHAR* path, const TCHAR* pattern) {
     FILINFO fno;
     FRESULT res;
     if ((res = fvx_opendir(&pdir, path)) != FR_OK) return res;
-    if (fvx_preaddir(&pdir, &fno, npattern) != FR_OK) *(fno.fname) = '\0';
-    fvx_closedir( &pdir );
     
     *(fname++) = '/';
-    strncpy(fname, fno.fname, _MAX_FN_LEN - (fname - path));
-    if (!*(fno.fname)) return FR_NO_PATH;
+    *fname = '\0';
     
-    return res;
+    while ((fvx_preaddir(&pdir, &fno, npattern) == FR_OK) && *(fno.fname)) {
+        int cmp = strncmp(fno.fname, fname, _MAX_FN_LEN);
+        if (((mode & FN_HIGHEST) && (cmp > 0)) || ((mode & FN_LOWEST) && (cmp < 0)) || !(*fname))
+            strncpy(fname, fno.fname, _MAX_FN_LEN - (fname - path));
+        if (!(mode & (FN_HIGHEST|FN_LOWEST))) break;
+    }
+    fvx_closedir( &pdir );
+    
+    return (*fname) ? FR_OK : FR_NO_PATH;
 }
 
 FRESULT fvx_findnopath (TCHAR* path, const TCHAR* pattern) {
@@ -345,7 +357,7 @@ FRESULT fvx_findnopath (TCHAR* path, const TCHAR* pattern) {
         }
         if (n_rep >= 16) return FR_DENIED;
     }
-    if (!n_rep) return fvx_stat(path, NULL);
+    if (!n_rep) return (fvx_stat(path, NULL) == FR_OK) ? FR_NO_PATH : FR_OK;
     
     while (fvx_stat(path, NULL) == FR_OK) {
         for (INT i = n_rep - 1; (i >= 0); i--) {

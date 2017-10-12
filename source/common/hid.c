@@ -1,16 +1,20 @@
 #include "hid.h"
 #include "i2c.h"
 #include "timer.h"
+#include "power.h"
 
-u32 InputWait() {
+u32 InputWait(u32 timeout_sec) {
     static u64 delay = 0;
     u32 pad_state_old = HID_STATE;
     u32 cart_state_old = CART_STATE;
     u32 sd_state_old = SD_STATE;
     u64 timer = timer_start();
+    u64 timer_mcu = timer;
     delay = (delay) ? 72 : 128;
     while (true) {
         u32 pad_state = HID_STATE;
+        if (timeout_sec && (timer_sec(timer) >= timeout_sec))
+            return TIMEOUT_HID; // HID timeout
         if (!(pad_state & BUTTON_ANY)) { // no buttons pressed
             u32 cart_state = CART_STATE;
             if (cart_state != cart_state_old)
@@ -19,11 +23,15 @@ u32 InputWait() {
             if (sd_state != sd_state_old)
                 return sd_state ? SD_INSERT : SD_EJECT;
             u8 special_key;
-            if (I2C_readRegBuf(I2C_DEV_MCU, 0x10, &special_key, 1)) {
+            if ((timer_msec(timer_mcu) >= 64) && (I2C_readRegBuf(I2C_DEV_MCU, 0x10, &special_key, 1))) {
+                #ifndef DISABLE_SLIDER
+                CheckBrightness();
+                #endif
                 if (special_key == 0x01)
                     return pad_state | BUTTON_POWER;
                 else if (special_key == 0x04)
                     return pad_state | BUTTON_HOME;
+                timer_mcu = timer_start();
             }
             pad_state_old = pad_state;
             delay = 0;

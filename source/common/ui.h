@@ -4,10 +4,13 @@
 
 #pragma once
 
+#include <vram.h>
 #include "common.h"
+
 
 #define BYTES_PER_PIXEL 3
 #define SCREEN_HEIGHT 240
+#define SCREEN_WIDTH(s) ((s == TOP_SCREEN) ? SCREEN_WIDTH_TOP : SCREEN_WIDTH_BOT)
 #define SCREEN_WIDTH_TOP 400
 #define SCREEN_WIDTH_BOT 320
 #ifdef FONT_6X10
@@ -44,6 +47,7 @@
 #define COLOR_TINTEDYELLOW  RGB(0xD0, 0xD0, 0x60)
 #define COLOR_TINTEDGREEN   RGB(0x70, 0x80, 0x70)
 #define COLOR_LIGHTGREY     RGB(0xB0, 0xB0, 0xB0)
+#define COLOR_LIGHTERGREY   RGB(0xD0, 0xD0, 0xD0)
 #define COLOR_DARKGREY      RGB(0x50, 0x50, 0x50)
 #define COLOR_DARKESTGREY   RGB(0x20, 0x20, 0x20)
 
@@ -52,8 +56,8 @@
 #define COLOR_STD_BG        COLOR_BLACK
 #define COLOR_STD_FONT      COLOR_WHITE
 
-#define TOP_SCREEN          top_screen
-#define BOT_SCREEN          bottom_screen
+#define TOP_SCREEN          ((u8*)VRAM_TOP_LA)
+#define BOT_SCREEN          ((u8*)VRAM_BOT_A)
 
 #ifdef SWITCH_SCREENS
 #define MAIN_SCREEN         TOP_SCREEN
@@ -67,12 +71,11 @@
 #define SCREEN_WIDTH_ALT    SCREEN_WIDTH_TOP
 #endif
 
-extern u8 *top_screen, *bottom_screen;
-
 void ClearScreen(unsigned char *screen, int color);
 void ClearScreenF(bool clear_main, bool clear_alt, int color);
 void DrawRectangle(u8* screen, int x, int y, int width, int height, int color);
 void DrawBitmap(u8* screen, int x, int y, int w, int h, u8* bitmap);
+void DrawQrCode(u8* screen, u8* qrcode);
 
 void DrawCharacter(unsigned char *screen, int character, int x, int y, int color, int bgcolor);
 void DrawString(unsigned char *screen, const char *str, int x, int y, int color, int bgcolor);
@@ -96,4 +99,5 @@ bool ShowStringPrompt(char* inputstr, u32 max_size, const char *format, ...);
 u64 ShowHexPrompt(u64 start_val, u32 n_digits, const char *format, ...);
 u64 ShowNumberPrompt(u64 start_val, const char *format, ...);
 bool ShowDataPrompt(u8* data, u32* size, const char *format, ...);
+bool ShowRtcSetterPrompt(void* time, const char *format, ...);
 bool ShowProgress(u64 current, u64 total, const char* opstr);

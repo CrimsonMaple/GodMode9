@@ -9,10 +9,27 @@
 // 0 -> pre 9.5 / 1 -> 9.5 / 2 -> post 9.5
 #define A9L_CRYPTO_TYPE(hdr) ((hdr->k9l[3] == 0xFF) ? 0 : (hdr->k9l[3] == '1') ? 1 : 2)
 
-u32 ValidateFirmHeader(FirmHeader* header, u32 data_size) {
+// valid addresses for FIRM section loading
+// pairs of start / end address, provided by Wolfvak
+#define FIRM_VALID_ADDRESS  \
+    0x08000040, 0x08100000, \
+    0x18000000, 0x18600000, \
+    0x1FF00000, 0x1FFFFC00
+
+// valid addresses (installable) for FIRM section loading
+#define FIRM_VALID_ADDRESS_INSTALL  \
+    FIRM_VALID_ADDRESS, \
+    0x10000000, 0x10200000
+    
+// valid addresses (bootable) for FIRM section loading
+#define FIRM_VALID_ADDRESS_BOOT \
+    FIRM_VALID_ADDRESS, \
+    0x20000000, 0x27FFFA00
+    
+u32 GetFirmSize(FirmHeader* header) {
     u8 magic[] = { FIRM_MAGIC };
     if (memcmp(header->magic, magic, sizeof(magic)) != 0)
-        return 1;
+        return 0;
     
     u32 firm_size = sizeof(FirmHeader);
     int section_arm11 = -1;
@@ -20,7 +37,8 @@ u32 ValidateFirmHeader(FirmHeader* header, u32 data_size) {
     for (u32 i = 0; i < 4; i++) {
         FirmSectionHeader* section = header->sections + i;
         if (!section->size) continue;
-        if (section->offset < firm_size) return 1;
+        if (section->offset < firm_size) return 0;
+        if ((section->offset % 512) || (section->address % 16) || (section->size % 512)) return 0;
         if ((header->entry_arm11 >= section->address) &&
             (header->entry_arm11 < section->address + section->size))
             section_arm11 = i;
@@ -30,12 +48,16 @@ u32 ValidateFirmHeader(FirmHeader* header, u32 data_size) {
         firm_size = section->offset + section->size;
     }
     
-    if ((firm_size > FIRM_MAX_SIZE) || (data_size && (firm_size > data_size)))
-        return 1;
+    if (firm_size > FIRM_MAX_SIZE) return 0;
     if ((header->entry_arm11 && (section_arm11 < 0)) || (header->entry_arm9 && (section_arm9 < 0)))
-        return 1;
+        return 0;
     
-    return 0;
+    return firm_size;
+}
+
+u32 ValidateFirmHeader(FirmHeader* header, u32 data_size) {
+    u32 firm_size = GetFirmSize(header);
+    return (!firm_size || (data_size && (firm_size > data_size))) ? 1 : 0;
 }
 
 u32 ValidateFirmA9LHeader(FirmA9LHeader* header) {
@@ -50,10 +72,53 @@ u32 ValidateFirmA9LHeader(FirmA9LHeader* header) {
     return sha_cmp((IS_DEVKIT) ? enckeyX0x15devhash : enckeyX0x15hash, header->keyX0x15, 0x10, SHA256_MODE);
 }
 
+u32 ValidateFirm(void* firm, u32 firm_size, bool installable) {
+    FirmHeader* header = (FirmHeader*) firm;
+    
+    // validate firm header
+    if ((firm_size < sizeof(FirmHeader)) || (ValidateFirmHeader(header, firm_size) != 0))
+        return 1;
+    
+    // check for boot9strap magic
+    bool b9s_fix = installable && (memcmp(&(header->reserved0[0x2D]), "B9S", 3) == 0);
+    
+    // hash verify all available sections and check load address
+    for (u32 i = 0; i < 4; i++) {
+        u32 whitelist_boot[] = { FIRM_VALID_ADDRESS_BOOT };
+        u32 whitelist_install[] = { FIRM_VALID_ADDRESS_INSTALL };
+        u32* whitelist = (installable) ? whitelist_install : whitelist_boot;
+        u32 whitelist_size = ((installable) ? sizeof(whitelist_install) : sizeof(whitelist_boot)) / (2*sizeof(u32));
+        FirmSectionHeader* section = header->sections + i;
+        if (!section->size) continue;
+        if (sha_cmp(section->hash, ((u8*) firm) + section->offset, section->size, SHA256_MODE) != 0)
+            return 1;
+        bool is_whitelisted = (b9s_fix && (i == 3)); // don't check last section in b9s
+        for (u32 a = 0; (a < whitelist_size) && !is_whitelisted; a++) {
+            if ((section->address >= whitelist[2*a]) && (section->address + section->size <= whitelist[(2*a)+1]))
+                is_whitelisted = true;
+        }
+        if (!is_whitelisted) return 1;
+    }
+    
+    // ARM9 / ARM11 entrypoints available?
+    if (!header->entry_arm9 || (installable && !header->entry_arm11))
+        return 1;
+    
+    // B9S screeninit flag?
+    if (installable && (header->reserved0[0]&0x1))
+        return 1;
+    
+    // Nintendo style entrypoints?
+    if (installable && ((header->entry_arm9 % 0x10) || (header->entry_arm11 % 0x10)))
+        return 1;
+    
+    return 0;
+}
+
 FirmSectionHeader* FindFirmArm9Section(FirmHeader* firm) {
     for (u32 i = 0; i < 4; i++) {
         FirmSectionHeader* section = firm->sections + i;
-        if (section->size && (section->type == 0))
+        if (section->size && (section->method == FIRM_NDMA_CPY))
             return section;
     }
     return NULL;
@@ -69,20 +134,28 @@ u32 GetArm9BinarySize(FirmA9LHeader* a9l) {
 
 u32 SetupSecretKey(u32 keynum) {
     static u8 __attribute__((aligned(32))) sector[0x200];
+    static u32 got_keys = 0;
+    u8* key = sector + (keynum*0x10);
     
-    // safety check
-    if (keynum >= 0x200/0x10) return 1;
+    if (keynum >= 0x200/0x10)
+        return 1; // safety
     
-    // seach for secret sector data...
-    if (GetLegitSector0x96(sector) == 0) {
-        setup_aeskey(0x11, sector + (keynum*0x10));
+    // try to load full secret sector or key from file
+    if (!(got_keys & (0x1<<keynum))) {
+        ReadNandSectors(sector, 0x96, 1, 0x11, NAND_SYSNAND);
+        if (ValidateSecretSector(sector) == 0) {
+            got_keys = 0xFFFFFFFF; // => got them all
+        } else if ((keynum < 2) && (LoadKeyFromFile(key, 0x11, 'N', (keynum == 0) ? "95" : "96"))) {
+            got_keys |= (0x1<<keynum); // got at least this one
+        }
+    }
+    
+    // setup the key
+    if (got_keys & (0x1<<keynum)) {
+        setup_aeskey(0x11, key);
         use_aeskey(0x11);
         return 0;
     }
-    
-    // try to load from key database
-    if ((keynum < 2) && (LoadKeyFromFile(NULL, 0x11, 'N', (keynum == 0) ? "95" : "96")))
-        return 0; // key found in keydb, done
     
     // out of options
     return 1;
@@ -174,6 +247,7 @@ u32 DecryptFirm(void* data, u32 offset, u32 size, FirmHeader* firm, FirmA9LHeade
 
 u32 DecryptFirmSequential(void* data, u32 offset, u32 size) {
     // warning: this will only work for sequential processing
+    // also, only for blocks aligned to 0x200 bytes
     // unexpected results otherwise
     static FirmHeader firm = { 0 };
     static FirmA9LHeader a9l = { 0 };
@@ -200,4 +274,25 @@ u32 DecryptFirmSequential(void* data, u32 offset, u32 size) {
     }
     
     return (a9lptr) ? DecryptFirm(data, offset, size, firmptr, a9lptr) : 0;
+}
+
+u32 DecryptFirmFull(void* data, u32 size) {
+    // this expects the full FIRM being in memory
+    FirmHeader* firm = (FirmHeader*) data;
+    FirmSectionHeader* arm9s = FindFirmArm9Section(firm);
+    if (ValidateFirmHeader(firm, size) != 0) return 1; // not a proper firm
+    if (!arm9s) return 0; // no ARM9 section -> not encrypted -> done
+    
+    FirmA9LHeader* a9l = (FirmA9LHeader*)(void*) ((u8*) data + arm9s->offset);
+    if (ValidateFirmA9LHeader(a9l) != 0) return 0; // no ARM9bin -> not encrypted -> done
+    
+    // decrypt FIRM and ARM9loader header
+    if ((DecryptFirm(data, 0, size, firm, a9l) != 0) || (DecryptA9LHeader(a9l) != 0))
+        return 1;
+    
+    // fix ARM9 section SHA and ARM9 entrypoint
+    sha_quick(arm9s->hash, (u8*) data + arm9s->offset, arm9s->size, SHA256_MODE);
+    firm->entry_arm9 = ARM9ENTRY_FIX(firm);
+    
+    return 0;
 }

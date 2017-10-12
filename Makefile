@@ -21,22 +21,24 @@ ifeq ($(SAFEMODE),1)
 	export TARGET	:=	SafeMode9
 endif
 BUILD		:=	build
-SOURCES		:=	source source/common source/filesys source/crypto source/fatfs source/nand source/virtual source/game source/gamecart source/quicklz
+SOURCES		:=	source source/common source/filesys source/crypto source/fatfs source/nand source/virtual source/game source/gamecart source/quicklz source/qrcodegen source/system source/utils
 DATA		:=	data
-INCLUDES	:=	source source/common source/font source/filesys source/crypto source/fatfs source/nand source/virtual source/game source/gamecart source/quicklz
+INCLUDES	:=	common source source/common source/font source/filesys source/crypto source/fatfs source/nand source/virtual source/game source/gamecart source/quicklz source/qrcodegen source/system source/utils
 
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH	:=	-mthumb -mthumb-interwork -flto
+ARCH	:=	-DARM9 -march=armv5te -mthumb -mthumb-interwork
 
-CFLAGS	:=	-g -Wall -Wextra -Wpedantic -Wcast-align -Wno-main -O2\
-			-march=armv5te -mtune=arm946e-s -fomit-frame-pointer -ffast-math -std=gnu11\
-			$(ARCH)
+ASFLAGS	:=	$(ARCH) -g -x assembler-with-cpp $(INCLUDE)
+CFLAGS	:=	$(ARCH) -g -Wall -Wextra -Wpedantic -Wcast-align -Wno-main -O2 \
+			-mtune=arm946e-s -fomit-frame-pointer -ffast-math -std=gnu11 \
+			$(INCLUDE) -Wno-unused-function
 
-CFLAGS	+=	$(INCLUDE) -DARM9
-
-CFLAGS	+=	-DBUILD_NAME="\"$(TARGET) (`date +'%Y/%m/%d'`)\""
+VERSION	:=	$(shell git describe --tags --abbrev=8)
+DBUILTS	:=	$(shell date +'%Y%m%d%H%M%S')
+DBUILTL :=	$(shell date +'%Y-%m-%d %H:%M:%S')
+CFLAGS	+=	-DDBUILTS="\"$(DBUILTS)\"" -DDBUILTL="\"$(DBUILTL)\"" -DVERSION="\"$(VERSION)\""
 
 ifeq ($(FONT),ORIG)
 CFLAGS	+=	-DFONT_ORIGINAL
@@ -54,14 +56,37 @@ ifeq ($(SAFEMODE),1)
 	CFLAGS += -DSAFEMODE
 endif
 
+ifeq ($(AL3X10MODE),1)
+	CFLAGS += -DAL3X10MODE
+endif
+
+ifeq ($(SALTMODE),1)
+	CFLAGS += -DSALTMODE
+endif
+
 ifeq ($(SWITCH_SCREENS),1)
 	CFLAGS += -DSWITCH_SCREENS
 endif
 
+ifeq ($(DISABLE_SLIDER),1)
+	CFLAGS += -DDISABLE_SLIDER
+endif
+
+ifneq ("$(wildcard $(CURDIR)/../$(DATA)/README.md)","")
+	CFLAGS += -DHARDCODE_README
+endif
+
+ifneq ("$(wildcard $(CURDIR)/../$(DATA)/aeskeydb.bin)","")
+	CFLAGS += -DHARDCODE_KEYS
+endif
+
+ifneq ("$(wildcard $(CURDIR)/../$(DATA)/autorun.gm9)","")
+	CFLAGS += -DAUTORUN_SCRIPT
+endif
+
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 
-ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	=	-T../link.ld -nostartfiles -g $(ARCH) -Wl,-Map,$(TARGET).map
+LDFLAGS	=	-T../link.ld -nostartfiles -g $(ARCH) -Wl,-Map,$(TARGET).map,-z,max-page-size=512
 
 LIBS	:=
 
@@ -90,9 +115,13 @@ export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
 SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
-BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/gm9*.*)))
+BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/README.md))) \
+				$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/aeskeydb.bin))) \
+				$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/autorun.gm9)))
 ifeq ($(SAFEMODE),1)
-	BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/sm9*.*)))
+	BINFILES	+=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/sm9*.*)))
+else
+	BINFILES	+=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/gm9*.*)))
 endif
 
 #---------------------------------------------------------------------------------
@@ -120,73 +149,54 @@ export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
-.PHONY: common clean all gateway firm binary cakehax cakerop brahma screeninit release
+ifeq ("$(wildcard $(CURDIR)/$(DATA)/vram0.img)","")
+	export FTCOMMON	:=	-D $(OUTPUT).elf $(OUTPUT_D)/screeninit.elf -C NDMA XDMA
+else
+    export FTCOMMON	:=	-A 0x18000000 -D $(OUTPUT).elf $(OUTPUT_D)/screeninit.elf $(CURDIR)/$(DATA)/vram0.img -C NDMA XDMA memcpy
+endif
+
+.PHONY: common clean all firm binary screeninit release
 
 #---------------------------------------------------------------------------------
-all: firm
+all: firm ntrboot
 
 common:
 	@[ -d $(OUTPUT_D) ] || mkdir -p $(OUTPUT_D)
 	@[ -d $(BUILD) ] || mkdir -p $(BUILD)
 
-submodules:
-	@-git submodule update --init --recursive
-
 screeninit:
-	@$(MAKE) dir_out=$(OUTPUT_D) -C screeninit
+	@$(MAKE) --no-print-directory dir_out=$(OUTPUT_D) -C screeninit
 
 binary: common
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 firm: binary screeninit
-	firmtool build $(OUTPUT).firm -D $(OUTPUT).elf $(OUTPUT_D)/screeninit.elf -C NDMA XDMA
+	firmtool build $(OUTPUT).firm $(FTCOMMON) -S nand-retail -g
+	firmtool build $(OUTPUT)_dev.firm $(FTCOMMON) -S nand-dev -g
 
-gateway: binary
-	@cp resources/LauncherTemplate.dat $(OUTPUT_D)/Launcher.dat
-	@dd if=$(OUTPUT).bin of=$(OUTPUT_D)/Launcher.dat bs=1497296 seek=1 conv=notrunc
-
-cakehax: submodules binary
-	@$(MAKE) dir_out=$(OUTPUT_D) name=$(TARGET).dat -C CakeHax bigpayload
-	@dd if=$(OUTPUT).bin of=$(OUTPUT).dat bs=512 seek=160
-
-cakerop: cakehax
-	@$(MAKE) DATNAME=$(TARGET).dat DISPNAME=$(TARGET) GRAPHICS=../resources/CakesROP -C CakesROP
-	@mv CakesROP/CakesROP.nds $(OUTPUT_D)/$(TARGET).nds
-
-brahma: submodules binary
-	@[ -d BrahmaLoader/data ] || mkdir -p BrahmaLoader/data
-	@cp $(OUTPUT).bin BrahmaLoader/data/payload.bin
-	@cp resources/BrahmaAppInfo BrahmaLoader/resources/AppInfo
-	@cp resources/BrahmaIcon.png BrahmaLoader/resources/icon.png
-	@$(MAKE) --no-print-directory -C BrahmaLoader APP_TITLE=$(TARGET)
-	@mv BrahmaLoader/output/*.3dsx $(OUTPUT_D)
-	@mv BrahmaLoader/output/*.smdh $(OUTPUT_D)
+ntrboot: binary screeninit
+	firmtool build $(OUTPUT)_ntr.firm $(FTCOMMON) -S spi-retail -g
+	firmtool build $(OUTPUT)_ntr_dev.firm $(FTCOMMON) -S spi-dev -g
 
 release:
-	@rm -fr $(BUILD) $(OUTPUT_D) $(RELEASE)
-	@$(MAKE) --no-print-directory binary
+	@-rm -fr $(BUILD) $(OUTPUT_D) $(RELEASE)
 	@$(MAKE) --no-print-directory firm
-	#@-make --no-print-directory cakerop
-	#@-make --no-print-directory brahma
+	@$(MAKE) --no-print-directory ntrboot
 	@[ -d $(RELEASE) ] || mkdir -p $(RELEASE)
-	#@[ -d $(RELEASE)/$(TARGET) ] || mkdir -p $(RELEASE)/$(TARGET)
-	@cp $(OUTPUT).bin $(RELEASE)
+	@[ -d $(RELEASE)/ntrboot ] || mkdir -p $(RELEASE)/ntrboot
 	@cp $(OUTPUT).firm $(RELEASE)
-	#@-cp $(OUTPUT).dat $(RELEASE)
-	#@-cp $(OUTPUT).nds $(RELEASE)
-	#@-cp $(OUTPUT).3dsx $(RELEASE)/$(TARGET)
-	#@-cp $(OUTPUT).smdh $(RELEASE)/$(TARGET)
 	@cp $(CURDIR)/README.md $(RELEASE)
 	@cp $(CURDIR)/HelloScript.gm9 $(RELEASE)
+	@cp $(OUTPUT)_ntr.firm $(RELEASE)/ntrboot
+	@cp $(OUTPUT)_ntr.firm.sha $(RELEASE)/ntrboot
+	@cp $(OUTPUT)_ntr_dev.firm $(RELEASE)/ntrboot
+	@cp $(OUTPUT)_ntr_dev.firm.sha $(RELEASE)/ntrboot
 	@cp -R $(CURDIR)/resources/gm9 $(RELEASE)/gm9
-	@-7z a $(RELEASE)/$(TARGET)-`date +'%Y%m%d-%H%M%S'`.zip $(RELEASE)/*
+	@-7z a $(RELEASE)/$(TARGET)-$(VERSION)-$(DBUILTS).zip $(RELEASE)/*
 
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@-$(MAKE) clean --no-print-directory -C CakeHax
-	@-$(MAKE) clean --no-print-directory -C CakesROP
-	@-$(MAKE) clean --no-print-directory -C BrahmaLoader
 	@-$(MAKE) clean --no-print-directory -C screeninit
 	@rm -fr $(BUILD) $(OUTPUT_D) $(RELEASE)
 
@@ -212,6 +222,21 @@ $(OUTPUT).elf	:	$(OFILES)
 # you need a rule like this for each extension you use as binary data
 #---------------------------------------------------------------------------------
 %_qlz.h %.qlz.o: %.qlz
+#---------------------------------------------------------------------------------
+	@echo $(notdir $<)
+	@$(bin2o)
+#---------------------------------------------------------------------------------
+%_bin.h %.bin.o: %.bin
+#---------------------------------------------------------------------------------
+	@echo $(notdir $<)
+	@$(bin2o)
+#---------------------------------------------------------------------------------
+%_gm9.h %.gm9.o: %.gm9
+#---------------------------------------------------------------------------------
+	@echo $(notdir $<)
+	@$(bin2o)
+#---------------------------------------------------------------------------------
+%_md.h %.md.o: %.md
 #---------------------------------------------------------------------------------
 	@echo $(notdir $<)
 	@$(bin2o)

@@ -2,6 +2,9 @@
 #include "aes.h"
 #include "sha.h"
 #include "ff.h"
+#ifdef HARDCODE_KEYS
+#include "aeskeydb_bin.h"
+#endif
 
 typedef struct {
     u8   slot;           // keyslot, 0x00...0x39 
@@ -61,52 +64,6 @@ void CryptAesKeyInfo(AesKeyInfo* info) {
     info->isEncrypted = !info->isEncrypted;
 }
 
-u32 CheckAesKeyInfo(u8* key, u32 keyslot, char type, char* id)
-{
-    static const AesKeyHashInfo keyHashes[] = {
-        { { 0x05, 'Y', "" }, KEYS_RETAIL, // Retail N3DS CTRNAND key SHA256
-         { 0x98, 0x24, 0x27, 0x14, 0x22, 0xB0, 0x6B, 0xF2, 0x10, 0x96, 0x9C, 0x36, 0x42, 0x53, 0x7C, 0x86,
-         0x62, 0x22, 0x5C, 0xFD, 0x6F, 0xAE, 0x9B, 0x0A, 0x85, 0xA5, 0xCE, 0x21, 0xAA, 0xB6, 0xC8, 0x4D }
-        },
-        { { 0x18, 'X', "" }, KEYS_RETAIL, // Retail NCCH Secure3 key SHA256
-         { 0x76, 0xC7, 0x6B, 0x65, 0x5D, 0xB8, 0x52, 0x19, 0xC5, 0xD3, 0x5D, 0x51, 0x7F, 0xFA, 0xF7, 0xA4,
-         0x3E, 0xBA, 0xD6, 0x6E, 0x31, 0xFB, 0xDD, 0x57, 0x43, 0x92, 0x59, 0x37, 0xA8, 0x93, 0xCC, 0xFC }
-        },
-        { { 0x1B, 'X', "" }, KEYS_RETAIL, // Retail NCCH Secure4 key SHA256
-         { 0x9A, 0x20, 0x1E, 0x7C, 0x37, 0x37, 0xF3, 0x72, 0x2E, 0x5B, 0x57, 0x8D, 0x11, 0x83, 0x7F, 0x19,
-         0x7C, 0xA6, 0x5B, 0xF5, 0x26, 0x25, 0xB2, 0x69, 0x06, 0x93, 0xE4, 0x16, 0x53, 0x52, 0xC6, 0xBB }
-        },
-        { { 0x25, 'X', "" }, KEYS_RETAIL, // Retail NCCH 7x key SHA256
-         { 0x7E, 0x87, 0x8D, 0xDE, 0x92, 0x93, 0x8E, 0x4C, 0x71, 0x7D, 0xD5, 0x3D, 0x1E, 0xA3, 0x5A, 0x75,
-         0x63, 0x3F, 0x51, 0x30, 0xD8, 0xCF, 0xD7, 0xC7, 0x6C, 0x8F, 0x4A, 0x8F, 0xB8, 0x70, 0x50, 0xCD }
-        }/*, 
-        { { 0x18, 'X', "" }, KEYS_DEVKIT, // DevKit NCCH Secure3 key SHA256
-         { 0x08, 0xE1, 0x09, 0x62, 0xF6, 0x5A, 0x09, 0xAA, 0x12, 0x2C, 0x7C, 0xBE, 0xDE, 0xA1, 0x9C, 0x4B,
-         0x5C, 0x9A, 0x8A, 0xC3, 0xD9, 0x8E, 0xA1, 0x62, 0x04, 0x11, 0xD7, 0xE8, 0x55, 0x70, 0xA6, 0xC2 }
-        },
-        { { 0x1B, 'X', "" }, KEYS_DEVKIT, // DevKit NCCH Secure4 key SHA256
-         { 0xA5, 0x3C, 0x3E, 0x5D, 0x09, 0x5C, 0x73, 0x35, 0x21, 0x79, 0x3F, 0x2E, 0x4C, 0x10, 0xCA, 0xAE,
-         0x87, 0x83, 0x51, 0x53, 0x46, 0x0B, 0x52, 0x39, 0x9B, 0x00, 0x62, 0xF6, 0x39, 0xCB, 0x62, 0x16 }
-        }*/
-    };
-    
-    u8 keySha256[32];
-    sha_quick(keySha256, key, 16, SHA256_MODE);
-    for (u32 p = 0; p < sizeof(keyHashes) / sizeof(AesKeyHashInfo); p++) {
-        if ((keyHashes[p].desc.slot != keyslot) || (keyHashes[p].desc.type != type))
-            continue;
-        if ((!id && keyHashes[p].desc.id[0]) || (id && strncmp(id, keyHashes[p].desc.id, 10) != 0))
-            continue;
-        if (keyHashes[p].keyUnitType && (keyHashes[p].keyUnitType != GetUnitKeysType()))
-            continue;
-        if (memcmp(keySha256, keyHashes[p].keySha256, 32) == 0) {
-            return 0;
-        }
-    }
-    
-    return 1;
-}
-
 u32 CheckKeySlot(u32 keyslot, char type)
 {
     static const AesNcchSampleInfo keyNcchSamples[] = {
@@ -146,7 +103,7 @@ u32 CheckKeySlot(u32 keyslot, char type)
         set_ctr(zeroes);
         aes_decrypt(sample, sample, 1, AES_CNT_CTRNAND_MODE);
         if (memcmp(keyNcchSamples[p].sample, sample, 16) == 0) {
-            keyXState |= (u64) 1 << keyslot;
+            keyXState |= 1ull << keyslot;
             return 0;
         }
     }
@@ -155,54 +112,75 @@ u32 CheckKeySlot(u32 keyslot, char type)
     return 1;
 }
 
-u32 LoadKeyFromFile(u8* key, u32 keyslot, char type, char* id)
+u32 LoadKeyDb(const char* path_db, AesKeyInfo* keydb, u32 bsize) {
+    UINT fsize = 0;
+    FIL fp;
+    
+    if (path_db) {
+        if (f_open(&fp, path_db, FA_READ | FA_OPEN_EXISTING) == FR_OK) {
+            if ((f_read(&fp, keydb, bsize, &fsize) != FR_OK) || (fsize >= bsize))
+                fsize = 0;
+            f_close(&fp);
+        }
+    } else {
+        #ifdef HARDCODE_KEYS
+        fsize = (aeskeydb_bin_size <= bsize) ? aeskeydb_bin_size : 0;
+        if (fsize) memcpy(keydb, aeskeydb_bin, aeskeydb_bin_size);
+        #else
+        // try to load aeskeydb.bin file
+        if (f_open(&fp, SUPPORT_PATH "/" KEYDB_NAME, FA_READ | FA_OPEN_EXISTING) == FR_OK) {
+            if ((f_read(&fp, keydb, bsize, &fsize) != FR_OK) || (fsize >= bsize)) fsize = 0;
+            f_close(&fp);
+        }
+        #endif
+    }
+    
+    u32 nkeys = 0;
+    if (fsize && !(fsize % sizeof(AesKeyInfo)))
+        nkeys = fsize / sizeof(AesKeyInfo);
+    return nkeys;
+}
+
+u32 LoadKeyFromFile(void* key, u32 keyslot, char type, char* id)
 {
-    const char* base[] = { SUPPORT_PATHS };
     u8 keystore[16] __attribute__((aligned(32))) = {0};
     bool found = false;
-    
-    // use keystore if key == NULL
-    if (!key) key = keystore;
     
     // checking the obvious
     if ((keyslot >= 0x40) || ((type != 'X') && (type != 'Y') && (type != 'N') && (type != 'I')))
         return 1;
     
     // check if already loaded
-    if (!id && (CheckKeySlot(keyslot, type) == 0)) return 0;
+    if (!key && !id && (CheckKeySlot(keyslot, type) == 0)) return 0;
+    
+    // use keystore if key == NULL
+    if (!key) key = keystore;
+    
     // try to get key from 'aeskeydb.bin' file
-    for (u32 i = 0; !found && (i < (sizeof(base)/sizeof(char*))); i++) {
-        FIL fp;
-        char path[64];
-        AesKeyInfo info;
-        UINT btr;
-        snprintf(path, 64, "%s/%s", base[i], KEYDB_NAME);
-        if (f_open(&fp, path, FA_READ | FA_OPEN_EXISTING) != FR_OK) continue;
-        while ((f_read(&fp, &info, sizeof(AesKeyInfo), &btr) == FR_OK) && (btr == sizeof(AesKeyInfo))) {
-            if ((info.slot == keyslot) && (info.type == type) && 
-                ((!id && !(info.id[0])) || (id && (strncmp(id, info.id, 10) == 0))) &&
-                (!info.keyUnitType || (info.keyUnitType == GetUnitKeysType()))) {
-                found = true;
-                if (info.isEncrypted)
-                    CryptAesKeyInfo(&info);
-                memcpy(key, info.key, 16);
-                break;
-            }
-        }
-        f_close(&fp);
+    AesKeyInfo* keydb = (AesKeyInfo*) TEMP_BUFFER;
+    u32 nkeys = LoadKeyDb(NULL, keydb, TEMP_BUFFER_SIZE);
+    for (u32 i = 0; i < nkeys; i++) {
+        AesKeyInfo* info = &(keydb[i]);
+        if (!((info->slot == keyslot) && (info->type == type) && 
+            ((!id && !(info->id[0])) || (id && (strncmp(id, info->id, 10) == 0))) &&
+            (!info->keyUnitType || (info->keyUnitType == GetUnitKeysType()))))
+            continue;
+        found = true;
+        if (info->isEncrypted)
+            CryptAesKeyInfo(info);
+        memcpy(key, info->key, 16);
+        break;
     }
     
     // load legacy slot0x??Key?.bin file instead
     if (!found && (type != 'I')) {
-        for (u32 i = 0; !found && (i < (sizeof(base)/sizeof(char*))); i++) {
-            FIL fp;
-            char path[64];
-            UINT btr;
-            snprintf(path, 64, "%s/slot0x%02lXKey%s%s.bin", base[i], keyslot,
-                (type == 'X') ? "X" : (type == 'Y') ? "Y" : (type == 'I') ? "IV" : "", (id) ? id : "");
-            if (f_open(&fp, path, FA_READ | FA_OPEN_EXISTING) != FR_OK) continue;
-            if ((f_read(&fp, key, 16, &btr) == FR_OK) && (btr == 16))
-                found = true;
+        char path[64];
+        FIL fp;
+        UINT btr;
+        snprintf(path, 64, "%s/slot0x%02lXKey%s%s.bin", SUPPORT_PATH, keyslot,
+            (type == 'X') ? "X" : (type == 'Y') ? "Y" : (type == 'I') ? "IV" : "", (id) ? id : "");
+        if (f_open(&fp, path, FA_READ | FA_OPEN_EXISTING) == FR_OK) {
+            found = ((f_read(&fp, key, 16, &btr) == FR_OK) && (btr == 16));
             f_close(&fp);
         }
     }
@@ -213,23 +191,82 @@ u32 LoadKeyFromFile(u8* key, u32 keyslot, char type, char* id)
     // done if this is an IV
     if (type == 'I') return 0;
     
-    // verify key (verification is disabled)
-    // if (CheckAesKeyInfo(key, keyslot, type, id) != 0) return 1;
-    
     // now, setup the key
     if (type == 'X') {
         setup_aeskeyX(keyslot, key);
-        keyXState |= (u64) 1 << keyslot;
+        keyXState |= 1ull << keyslot;
     } else if (type == 'Y') {
         setup_aeskeyY(keyslot, key);
-        keyYState |= (u64) 1 << keyslot;
+        keyYState |= 1ull << keyslot;
     } else { // normalKey includes keyX & keyY
         setup_aeskey(keyslot, key);
-        keyState  |= (u64) 1 << keyslot;
-        keyXState |= (u64) 1 << keyslot;
-        keyYState |= (u64) 1 << keyslot;
+        keyState  |= 1ull << keyslot;
+        keyXState |= 1ull << keyslot;
+        keyYState |= 1ull << keyslot;
     }
     use_aeskey(keyslot);
     
     return 0;
+}
+
+u32 InitKeyDb(const char* path)
+{
+    // use this to quickly initialize all applicable keys in aeskeydb.bin
+    static const u64 keyslot_whitelist = (1ull<<0x02)|(1ull<<0x03)|(1ull<<0x05)|(1ull<<0x18)|(1ull<<0x19)|(1ull<<0x1A)|(1ull<<0x1B)|
+        (1ull<<0x1C)|(1ull<<0x1D)|(1ull<<0x1E)|(1ull<<0x1F)|(1ull<<0x24)|(1ull<<0x25)|(1ull<<0x2F);
+    
+    // try to load aeskeydb.bin file
+    AesKeyInfo* keydb = (AesKeyInfo*) (void*) TEMP_BUFFER;
+    u32 nkeys = LoadKeyDb(path, keydb, TEMP_BUFFER_SIZE);
+    if (!nkeys) return 1;
+    
+    // apply all applicable keys
+    for (u32 i = 0; i < nkeys; i++) {
+        AesKeyInfo* info = &(keydb[i]);
+        if ((info->slot >= 0x40) || ((info->type != 'X') && (info->type != 'Y') && (info->type != 'N') && (info->type != 'I')))
+            return 1; // looks faulty, better stop right here
+        if (!path && !((1ull<<info->slot)&keyslot_whitelist)) continue; // not in keyslot whitelist
+        if ((info->type == 'I') || (*(info->id)) || (info->keyUnitType && (info->keyUnitType != GetUnitKeysType())) ||
+            (CheckKeySlot(info->slot, info->type) == 0)) continue; // most likely valid, but not applicable or already set
+        if (info->isEncrypted) CryptAesKeyInfo(info); // decrypt key
+        
+        // apply key
+        u8 key[16] __attribute__((aligned(32))) = {0};
+        char type = info->type;
+        u32 keyslot = info->slot;
+        memcpy(key, info->key, 16);
+        if (type == 'X') {
+            setup_aeskeyX(keyslot, key);
+            keyXState |= 1ull << keyslot;
+        } else if (type == 'Y') {
+            setup_aeskeyY(keyslot, key);
+            keyYState |= 1ull << keyslot;
+        } else { // normalKey includes keyX & keyY
+            setup_aeskey(keyslot, key);
+            keyState  |= 1ull << keyslot;
+            keyXState |= 1ull << keyslot;
+            keyYState |= 1ull << keyslot;
+        }
+        use_aeskey(keyslot);
+    }
+    
+    return 0;
+}
+
+u32 CheckRecommendedKeyDb(const char* path)
+{
+    // SHA-256 of the reommended aeskeydb.bin file
+    // equals MD5 A5B28945A7C051D7A0CD18AF0E580D1B
+    const u8 recommended_sha[0x20] = {
+        0x40, 0x76, 0x54, 0x3D, 0xA3, 0xFF, 0x91, 0x1C, 0xE1, 0xCC, 0x4E, 0xC7, 0x2F, 0x92, 0xE4, 0xB7,
+        0x2B, 0x24, 0x00, 0x15, 0xBE, 0x9B, 0xFC, 0xDE, 0x7F, 0xED, 0x95, 0x1D, 0xD5, 0xAB, 0x2D, 0xCB
+    };
+    
+    // try to load aeskeydb.bin file
+    AesKeyInfo* keydb = (AesKeyInfo*) (void*) TEMP_BUFFER;
+    u32 nkeys = LoadKeyDb(path, keydb, TEMP_BUFFER_SIZE);
+    if (!nkeys) return 1;
+    
+    // compare with recommended SHA
+    return sha_cmp(recommended_sha, keydb, nkeys * sizeof(AesKeyInfo), SHA256_MODE);
 }

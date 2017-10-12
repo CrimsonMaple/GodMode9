@@ -3,10 +3,10 @@
 #include "fatmbr.h"
 #include "nand.h"
 #include "game.h"
+#include "agbsave.h"
 #include "keydb.h"
 #include "ctrtransfer.h"
-#include "chainload.h"
-#include "fsscript.h"
+#include "scripting.h"
 
 u32 IdentifyFileType(const char* path) {
     const u8 romfs_magic[] = { ROMFS_MAGIC };
@@ -24,9 +24,11 @@ u32 IdentifyFileType(const char* path) {
     
     if (!fsize) return 0;
     if (fsize >= 0x200) {
-        if ((getbe32(header + 0x100) == 0x4E435344) && (getbe64(header + 0x110) == (u64) 0x0104030301000000) &&
-            (getbe64(header + 0x108) == (u64) 0) && (fsize >= 0x8FC8000)) {
-            return IMG_NAND; // NAND image
+        if (ValidateNandNcsdHeader((NandNcsdHeader*) data) == 0) {
+            return (fsize >= GetNandNcsdMinSizeSectors((NandNcsdHeader*) data) * 0x200) ?
+                IMG_NAND : (fsize == sizeof(NandNcsdHeader)) ? HDR_NAND : 0; // NAND image or just header
+        } else if ((strncasecmp(path, "S:/nand.bin", 16) == 0) || (strncasecmp(path, "E:/nand.bin", 16) == 0)) {
+            return NOIMG_NAND; // on NAND, but no proper NAND image
         } else if (ValidateFatHeader(header) == 0) {
             return IMG_FAT; // FAT image file
         } else if (ValidateMbrHeader((MbrHeader*) data) == 0) {
@@ -63,14 +65,18 @@ u32 IdentifyFileType(const char* path) {
             return GAME_TICKET; // Ticket file (not used for anything right now)
         } else if (ValidateFirmHeader((FirmHeader*) data, fsize) == 0) {
             return SYS_FIRM; // FIRM file
+        } else if ((ValidateAgbSaveHeader((AgbSaveHeader*) data) == 0) && (fsize >= AGBSAVE_MAX_SIZE)) {
+            return SYS_AGBSAVE; // AGBSAVE file
         } else if (memcmp(header + 0x100, tickdb_magic, sizeof(tickdb_magic)) == 0) {
             return SYS_TICKDB; // ticket.db
         } else if (memcmp(header, smdh_magic, sizeof(smdh_magic)) == 0) {
             return GAME_SMDH; // SMDH file
         } else if (ValidateTwlHeader((TwlHeader*) data) == 0) {
-            return GAME_NDS; // NDS rom file
+            if (((TwlHeader*)data)->ntr_rom_size <= fsize)
+                return GAME_NDS; // NDS rom file
         }
     }
+    
     if ((fsize > sizeof(BossHeader)) &&
         (ValidateBossHeader((BossHeader*) data, fsize) == 0)) {
         return GAME_BOSS; // BOSS (SpotPass) file
@@ -78,6 +84,27 @@ u32 IdentifyFileType(const char* path) {
         (GetNcchInfoVersion((NcchInfoHeader*) data)) &&
         fname && (strncasecmp(fname, NCCHINFO_NAME, 32) == 0)) {
         return BIN_NCCHNFO; // ncchinfo.bin file
+    
+    } else if (ext && ((strncasecmp(ext, "cdn", 4) == 0) || (strncasecmp(ext, "nus", 4) == 0))) {
+        char path_cetk[256];
+        char* ext_cetk = path_cetk + (ext - path);
+        strncpy(ext_cetk, "cetk", 5);
+        if (FileGetSize(path_cetk) > 0)
+            return GAME_NUSCDN; // NUS/CDN type 2
+    } else if (strncasecmp(fname, TIKDB_NAME_ENC, sizeof(TIKDB_NAME_ENC)+1) == 0) {
+        return BIN_TIKDB | FLAG_ENC; // titlekey database / encrypted
+    } else if (strncasecmp(fname, TIKDB_NAME_DEC, sizeof(TIKDB_NAME_DEC)+1) == 0) {
+        return BIN_TIKDB; // titlekey database / decrypted
+    } else if (strncasecmp(fname, KEYDB_NAME, sizeof(KEYDB_NAME)+1) == 0) {
+        return BIN_KEYDB; // key database
+    } else if ((sscanf(fname, "slot%02lXKey", &id) == 1) && (strncasecmp(ext, "bin", 4) == 0) && (fsize = 16) && (id < 0x40)) {
+        return BIN_LEGKEY; // legacy key file
+    } else if (ValidateText((char*) data, (fsize > 0x200) ? 0x200 : fsize)) {
+        u32 type = 0;
+        if ((fsize <= SCRIPT_MAX_SIZE) && ext && (strncasecmp(ext, SCRIPT_EXT, strnlen(SCRIPT_EXT, 16) + 1) == 0))
+            type |= TXT_SCRIPT; // should be a script (which is also generic text)
+        if (fsize < TEMP_BUFFER_SIZE) type |= TXT_GENERIC;
+        return type;
     } else if ((strnlen(fname, 16) == 8) && (sscanf(fname, "%08lx", &id) == 1)) {
         char path_cdn[256];
         char* name_cdn = path_cdn + (fname - path);
@@ -88,28 +115,6 @@ u32 IdentifyFileType(const char* path) {
         strncpy(name_cdn, "cetk", 5);
         if (FileGetSize(path_cdn) > 0)
             return GAME_NUSCDN; // NUS/CDN type 1
-    } else if (ext && ((strncasecmp(ext, "cdn", 4) == 0) || (strncasecmp(ext, "nus", 4) == 0))) {
-        char path_cetk[256];
-        char* ext_cetk = path_cetk + (ext - path);
-        strncpy(ext_cetk, "cetk", 5);
-        if (FileGetSize(path_cetk) > 0)
-            return GAME_NUSCDN; // NUS/CDN type 2
-    } else if (strncasecmp(fname, TIKDB_NAME_ENC, sizeof(TIKDB_NAME_ENC)) == 0) {
-        return BIN_TIKDB | FLAG_ENC; // titlekey database / encrypted
-    } else if (strncasecmp(fname, TIKDB_NAME_DEC, sizeof(TIKDB_NAME_DEC)) == 0) {
-        return BIN_TIKDB; // titlekey database / decrypted
-    } else if (strncasecmp(fname, KEYDB_NAME, sizeof(KEYDB_NAME)) == 0) {
-        return BIN_KEYDB; // key database
-    } else if ((sscanf(fname, "slot%02lXKey", &id) == 1) && (strncasecmp(ext, "bin", 4) == 0) && (fsize = 16) && (id < 0x40)) {
-        return BIN_LEGKEY; // legacy key file
-    #if PAYLOAD_MAX_SIZE <= TEMP_BUFFER_SIZE
-    } else if ((fsize <= PAYLOAD_MAX_SIZE) && ext && (strncasecmp(ext, "bin", 4) == 0)) {
-        return BIN_LAUNCH; // assume it's an ARM9 payload
-    #endif
-    } else if (ValidateText((char*) data, (fsize > 0X200) ? 0x200 : fsize)) {
-        if ((fsize <= SCRIPT_MAX_SIZE) && ext && (strncasecmp(ext, SCRIPT_EXT, strnlen(SCRIPT_EXT, 16) + 1) == 0))
-            return TXT_SCRIPT | TXT_GENERIC; // should be a script (which is also generic text)
-        else if (fsize < TEMP_BUFFER_SIZE) return TXT_GENERIC;
     }
     
     return 0;

@@ -111,8 +111,8 @@ bool GetVirtualFile(VirtualFile* vfile, const char* path) {
         if (!(vdir.flags & VFLAG_LV3)) { // standard method
             while (true) {
                 if (!ReadVirtualDir(vfile, &vdir)) return false;
-                if ((!(vfile->flags & VFLAG_LV3) && (strncasecmp(name, vfile->name, 32) == 0)) ||
-                    ((vfile->flags & VFLAG_LV3) && MatchVGameLv3Filename(name, vfile, 256)))
+                if ((!(vfile->flags & VRT_GAME) && (strncasecmp(name, vfile->name, 32) == 0)) ||
+                    ((vfile->flags & VRT_GAME) && MatchVGameFilename(name, vfile, 256)))
                     break; // entry found
             }
         } else { // use lv3 hashes for quicker search
@@ -132,8 +132,8 @@ bool GetVirtualDir(VirtualDir* vdir, const char* path) {
 }
 
 bool GetVirtualFilename(char* name, const VirtualFile* vfile, u32 n_chars) {
-    if (!(vfile->flags & VFLAG_LV3)) strncpy(name, vfile->name, n_chars);
-    else if (!GetVGameLv3Filename(name, vfile, n_chars)) return false;
+    if (!(vfile->flags & VRT_GAME)) strncpy(name, vfile->name, n_chars);
+    else if (!GetVGameFilename(name, vfile, n_chars)) return false;
     return true;
 }
 
@@ -170,13 +170,30 @@ int WriteVirtualFile(const VirtualFile* vfile, const void* buffer, u64 offset, u
         count = vfile->size - offset;
     if (bytes_written) *bytes_written = count;
     
-    if (vfile->flags & (VRT_SYSNAND|VRT_EMUNAND|VRT_IMGNAND)) {
+    if (vfile->flags & VFLAG_READONLY) {
+        return -1;
+    } else if (vfile->flags & (VRT_SYSNAND|VRT_EMUNAND|VRT_IMGNAND)) {
         return WriteVNandFile(vfile, buffer, offset, count);
     } else if (vfile->flags & VRT_MEMORY) {
         return WriteVMemFile(vfile, buffer, offset, count);
     } // no write support for virtual game / tickdb / keydb / cart files
     
     return -1;
+}
+
+int DeleteVirtualFile(const VirtualFile* vfile) {
+    u8* zeroes = (u8*) TEMP_BUFFER;
+    u32 zeroes_size = TEMP_BUFFER_SIZE;
+    
+    if (!(vfile->flags & VFLAG_DELETABLE)) return -1;
+    memset(zeroes, 0x00, TEMP_BUFFER_SIZE);
+    for (u64 pos = 0; pos < vfile->size; pos += zeroes_size) {
+        u64 wipe_bytes = min(zeroes_size, vfile->size - pos);
+        if (WriteVirtualFile(vfile, zeroes, pos, wipe_bytes, NULL) != 0)
+            return -1;
+    }
+    
+    return 0;
 }
 
 u64 GetVirtualDriveSize(const char* path) {

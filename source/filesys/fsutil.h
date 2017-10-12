@@ -8,9 +8,10 @@
 #define SILENT          (1UL<<2)
 #define CALC_SHA        (1UL<<3)
 #define BUILD_PATH      (1UL<<4)
-#define ASK_ALL         (1UL<<5)
-#define SKIP_ALL        (1UL<<6)
-#define OVERWRITE_ALL   (1UL<<7)
+#define ALLOW_EXPAND    (1UL<<5)
+#define ASK_ALL         (1UL<<6)
+#define SKIP_ALL        (1UL<<7)
+#define OVERWRITE_ALL   (1UL<<8)
 
 /** Return total size of SD card **/
 uint64_t GetSDCardSize();
@@ -34,13 +35,16 @@ size_t FileGetData(const char* path, void* data, size_t size, size_t foffset);
 size_t FileGetSize(const char* path);
 
 /** Get SHA-256 of file **/
-bool FileGetSha256(const char* path, u8* sha256);
+bool FileGetSha256(const char* path, u8* sha256, u64 offset, u64 size);
 
 /** Find data in file **/
 u32 FileFindData(const char* path, u8* data, u32 size_data, u32 offset_file);
 
 /** Inject file into file @offset **/
 bool FileInjectFile(const char* dest, const char* orig, u64 off_dest, u64 off_orig, u64 size, u32* flags);
+
+/** Create a dummy file at dest **/
+bool FileCreateDummy(const char* cpath, const char* filename, u64 size);
 
 /** Create a new directory in cpath **/
 bool DirCreate(const char* cpath, const char* dirname);

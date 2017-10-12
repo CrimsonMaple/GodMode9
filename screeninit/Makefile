@@ -12,9 +12,14 @@ dir_source := source
 dir_build := build
 dir_out := ../$(dir_build)
 
-ASFLAGS := -mcpu=mpcore -mfloat-abi=hard
-CFLAGS  := -Wall -Wextra -MMD -MP -mthumb -mthumb-interwork $(ASFLAGS) -fno-builtin -std=c11 -Wno-main -O2 -flto -ffast-math
-LDFLAGS := -nostdlib
+ARCH    := -DARM11 -mcpu=mpcore -mfloat-abi=soft -marm -mno-thumb-interwork
+INCLUDE := -I$(dir_source) -I../common
+
+ASFLAGS := $(ARCH) -x assembler-with-cpp $(INCLUDE)
+CFLAGS  := $(ARCH) -Wall -Wextra -MMD -MP -fno-builtin \
+           -Wno-unused-function -Wno-unused-variable \
+           -std=c11 -O2 -flto -ffast-math -Wno-main $(INCLUDE)
+LDFLAGS := -nostdlib -nostartfiles -Wl,-z,max-page-size=512
 
 objects = $(patsubst $(dir_source)/%.s, $(dir_build)/%.o, \
           $(patsubst $(dir_source)/%.c, $(dir_build)/%.o, \
@@ -35,8 +40,8 @@ $(dir_out)/$(name).elf: $(objects)
 
 $(dir_build)/%.o: $(dir_source)/%.c
 	@mkdir -p "$(@D)"
-	$(COMPILE.c) $(OUTPUT_OPTION) $<
+	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(dir_build)/%.o: $(dir_source)/%.s
 	@mkdir -p "$(@D)"
-	$(COMPILE.s) $(OUTPUT_OPTION) $<
+	$(CC) -c $(ASFLAGS) -o $@ $<

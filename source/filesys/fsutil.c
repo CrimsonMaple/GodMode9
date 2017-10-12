@@ -11,8 +11,8 @@
 #include "ff.h"
 #include "ui.h"
 
-#define SKIP_CUR        (1UL<<8)
-#define OVERWRITE_CUR   (1UL<<9)
+#define SKIP_CUR        (1UL<< 9)
+#define OVERWRITE_CUR   (1UL<<10)
 
 #define _MAX_FS_OPT     8 // max file selector options
 
@@ -105,7 +105,7 @@ bool FileUnlock(const char* path) {
     if (fx_open(&file, path, FA_READ | FA_OPEN_EXISTING) != FR_OK) {
         char pathstr[32 + 1];
         TruncateString(pathstr, path, 32, 8);
-        if (GetMountState() && (strncmp(path, GetMountPath(), 256) == 0) && 
+        if (GetMountState() && (strncasecmp(path, GetMountPath(), 256) == 0) && 
             (ShowPrompt(true, "%s\nFile is currently mounted.\nUnmount to unlock?", pathstr))) {
             InitImgFS(NULL);
             if (fx_open(&file, path, FA_READ | FA_OPEN_EXISTING) != FR_OK)
@@ -136,7 +136,7 @@ size_t FileGetSize(const char* path) {
     return fno.fsize;
 }
 
-bool FileGetSha256(const char* path, u8* sha256) {
+bool FileGetSha256(const char* path, u8* sha256, u64 offset, u64 size) {
     bool ret = true;
     FIL file;
     u64 fsize;
@@ -144,14 +144,17 @@ bool FileGetSha256(const char* path, u8* sha256) {
     if (fvx_open(&file, path, FA_READ | FA_OPEN_EXISTING) != FR_OK)
         return false;
     fsize = fvx_size(&file);
-    fvx_lseek(&file, 0);
+    if (offset + size > fsize) return false;
+    if (!size) size = fsize - offset;
+    fvx_lseek(&file, offset);
     ShowProgress(0, 0, path);
     sha_init(SHA256_MODE);
-    for (u64 pos = 0; (pos < fsize) && ret; pos += MAIN_BUFFER_SIZE) {
+    for (u64 pos = 0; (pos < size) && ret; pos += MAIN_BUFFER_SIZE) {
+        UINT read_bytes = min(MAIN_BUFFER_SIZE, size - pos);
         UINT bytes_read = 0;
-        if (fvx_read(&file, MAIN_BUFFER, MAIN_BUFFER_SIZE, &bytes_read) != FR_OK)
+        if (fvx_read(&file, MAIN_BUFFER, read_bytes, &bytes_read) != FR_OK)
             ret = false;
-        if (!ShowProgress(pos + bytes_read, fsize, path))
+        if (!ShowProgress(pos + bytes_read, size, path))
             ret = false;
         sha_update(MAIN_BUFFER, bytes_read);
     }
@@ -204,15 +207,16 @@ u32 FileFindData(const char* path, u8* data, u32 size_data, u32 offset_file) {
 bool FileInjectFile(const char* dest, const char* orig, u64 off_dest, u64 off_orig, u64 size, u32* flags) {
     FIL ofile;
     FIL dfile;
+    bool allow_expand = (flags && (*flags & ALLOW_EXPAND));
     
     if (!CheckWritePermissions(dest)) return false;
-    if (strncmp(dest, orig, 256) == 0) {
+    if (strncasecmp(dest, orig, 256) == 0) {
         ShowPrompt(false, "Error: Can't inject file into itself");
         return false;
     }
     
     // open destination / origin
-    if (fvx_open(&dfile, dest, FA_WRITE | FA_OPEN_EXISTING) != FR_OK)
+    if (fvx_open(&dfile, dest, FA_WRITE | ((allow_expand) ? FA_OPEN_ALWAYS : FA_OPEN_EXISTING)) != FR_OK)
         return false;
     if ((fvx_open(&ofile, orig, FA_READ | FA_OPEN_EXISTING) != FR_OK) &&
         (!FileUnlock(orig) || (fvx_open(&ofile, orig, FA_READ | FA_OPEN_EXISTING) != FR_OK))) {
@@ -225,7 +229,7 @@ bool FileInjectFile(const char* dest, const char* orig, u64 off_dest, u64 off_or
         size = fvx_size(&ofile) - off_orig;
     
     // check file limits
-    if (off_dest + size > fvx_size(&dfile)) {
+    if (!allow_expand && (off_dest + size > fvx_size(&dfile))) {
         ShowPrompt(false, "Operation would write beyond end of file");
         fvx_close(&dfile);
         fvx_close(&ofile);
@@ -249,7 +253,7 @@ bool FileInjectFile(const char* dest, const char* orig, u64 off_dest, u64 off_or
             ret = false;
         if (ret && !ShowProgress(pos + bytes_read, size, orig)) {
             if (flags && (*flags & NO_CANCEL)) {
-                ShowPrompt(false, "Cancel is now allowed here");
+                ShowPrompt(false, "Cancel is not allowed here");
             } else ret = !ShowPrompt(true, "B button detected. Cancel?");
             ShowProgress(0, 0, orig);
             ShowProgress(pos + bytes_read, size, orig);
@@ -261,6 +265,23 @@ bool FileInjectFile(const char* dest, const char* orig, u64 off_dest, u64 off_or
     fvx_close(&ofile);
     
     return ret;
+}
+
+bool FileCreateDummy(const char* cpath, const char* filename, u64 size) {
+    char npath[256]; // 256 is the maximum length of a full path
+    if (!CheckWritePermissions(cpath)) return false;
+    snprintf(npath, 255, "%s/%s", cpath, filename);
+    
+    // create dummy file (fail if already existing)
+    // then, expand the file size via cluster preallocation
+    FIL dfile;
+    if (fx_open(&dfile, npath, FA_WRITE | FA_CREATE_NEW) != FR_OK)
+        return false;
+    f_lseek(&dfile, size > 0xFFFFFFFF ? 0xFFFFFFFF : (FSIZE_t) size);
+    f_sync(&dfile);
+    fx_close(&dfile);
+    
+    return true;
 }
 
 bool DirCreate(const char* cpath, const char* dirname) {
@@ -319,7 +340,6 @@ bool DirInfo(const char* path, u64* tsize, u32* tdirs, u32* tfiles) {
     char fpath[256];
     strncpy(fpath, path, 255);
     *tsize = *tdirs = *tfiles = 0;
-    ShowString("Analyzing dir, please wait...");
     bool res = DirInfoWorker(fpath, virtual, tsize, tdirs, tfiles);
     return res;
 }
@@ -408,24 +428,17 @@ bool PathMoveCopyRec(char* dest, char* orig, u32* flags, bool move) {
             ShowProgress(0, 0, orig); // reinit progress bar
         }
         
-        fsize = fvx_size(&ofile);
-        if (!to_virtual && (GetFreeSpace(dest) < fsize)) {
-            if (!silent) ShowPrompt(false, "%s\nError: Not enough space in drive", deststr);
-            fvx_close(&ofile);
-            return false;
-        }
-        
         if (fvx_open(&dfile, dest, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
             if (!silent) ShowPrompt(false, "%s\nError: Cannot open destination file", deststr);
             fvx_close(&ofile);
             return false;
         }
         
-        if (to_virtual && (fvx_size(&dfile) < fsize)) {
-            if (!silent) ShowPrompt(false, "%s\nError: Not enough virtual space", deststr);
-            fvx_close(&ofile);
-            fvx_close(&dfile);
-            return false;
+        ret = true; // destination file exists by now, so we need to handle deletion
+        fsize = fvx_size(&ofile); // check space via cluster preallocation
+        if ((fvx_lseek(&dfile, fsize) != FR_OK) || (fvx_sync(&dfile) != FR_OK)) {
+            if (!silent) ShowPrompt(false, "%s\nError: Not enough space available", deststr);
+            ret = false;
         }
         
         fvx_lseek(&dfile, 0);
@@ -433,7 +446,6 @@ bool PathMoveCopyRec(char* dest, char* orig, u32* flags, bool move) {
         fvx_lseek(&ofile, 0);
         fvx_sync(&ofile);
         
-        ret = true;
         if (flags && (*flags & CALC_SHA)) sha_init(SHA256_MODE);
         for (u64 pos = 0; (pos < fsize) && ret; pos += MAIN_BUFFER_SIZE) {
             UINT bytes_read = 0;
@@ -444,7 +456,7 @@ bool PathMoveCopyRec(char* dest, char* orig, u32* flags, bool move) {
                 ret = false;
             if (ret && !ShowProgress(pos + bytes_read, fsize, orig)) {
                 if (flags && (*flags & NO_CANCEL)) {
-                    ShowPrompt(false, "%s\nCancel is now allowed here", deststr);
+                    ShowPrompt(false, "%s\nCancel is not allowed here", deststr);
                 } else ret = !ShowPrompt(true, "%s\nB button detected. Cancel?", deststr);
                 ShowProgress(0, 0, orig);
                 ShowProgress(pos + bytes_read, fsize, orig);
@@ -497,7 +509,7 @@ bool PathMoveCopy(const char* dest, const char* orig, u32* flags, bool move) {
     
     // is destination part of origin?
     u32 olen = strnlen(lorig, 255);
-    if ((strncmp(ldest, lorig, olen) == 0) && (ldest[olen] == '/')) {
+    if ((strncasecmp(ldest, lorig, olen) == 0) && (ldest[olen] == '/')) {
         ShowPrompt(false, "%s\nError: Destination is part of origin", deststr);
         return false;
     }
@@ -509,7 +521,7 @@ bool PathMoveCopy(const char* dest, const char* orig, u32* flags, bool move) {
         dname++;
         
         // check & fix destination == origin
-        while (strncmp(ldest, lorig, 255) == 0) {
+        while (strncasecmp(ldest, lorig, 255) == 0) {
             if (!ShowStringPrompt(dname, 255 - (dname - ldest), "%s\nDestination equals origin\nChoose another name?", deststr))
                 return false;
         }
@@ -548,30 +560,39 @@ bool PathMoveCopy(const char* dest, const char* orig, u32* flags, bool move) {
         if (flags && (*flags & BUILD_PATH)) fvx_rmkpath(ldest);
         
         // actual move / copy operation
-        bool same_drv = (strncmp(lorig, ldest, 2) == 0);
+        bool same_drv = (strncasecmp(lorig, ldest, 2) == 0);
         bool res = PathMoveCopyRec(ldest, lorig, flags, move && same_drv);
         if (move && res && (!flags || !(*flags&SKIP_CUR))) PathDelete(lorig);
         return res;
     } else { // virtual destination handling
         // can't write an SHA file to a virtual destination
         if (flags) *flags |= ~CALC_SHA;
+        bool force_unmount = false;
+        
+        // handle NAND image unmounts
+        if (ddrvtype & (DRV_SYSNAND|DRV_EMUNAND|DRV_IMAGE)) {
+            FILINFO fno;
+            // virtual NAND files over 4 MB require unomunt, totally arbitrary limit (hacky!)
+            if ((fvx_stat(ldest, &fno) == FR_OK) && (fno.fsize > 4 * 1024 * 1024))
+                force_unmount = true;
+        }
         
         // prevent illegal operations
-        if (odrvtype & ddrvtype & (DRV_SYSNAND|DRV_EMUNAND|DRV_IMAGE)) {
+        if (force_unmount && (odrvtype & ddrvtype & (DRV_SYSNAND|DRV_EMUNAND|DRV_IMAGE))) {
             ShowPrompt(false, "Copy operation is not allowed");
             return false; 
         }
         
         // check destination == origin
-        if (strncmp(ldest, lorig, 255) == 0) {
+        if (strncasecmp(ldest, lorig, 255) == 0) {
             ShowPrompt(false, "%s\nDestination equals origin", deststr);
             return false;
         }
         
         // actual virtual copy operation
-        DismountDriveType(DriveType(ldest)&(DRV_SYSNAND|DRV_EMUNAND|DRV_IMAGE));
+        if (force_unmount) DismountDriveType(DriveType(ldest)&(DRV_SYSNAND|DRV_EMUNAND|DRV_IMAGE));
         bool res = PathMoveCopyRec(ldest, lorig, flags, false);
-        InitExtFS();
+        if (force_unmount) InitExtFS();
         return res;
     }
 }
