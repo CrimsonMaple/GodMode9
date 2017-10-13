@@ -865,7 +865,7 @@ u32 FileHandlerMenu(char* current_path, u32* cursor, u32* scroll, PaneData** pan
     bool scriptable = (FTYPE_SCRIPT(filetype));
     bool bootable = (FTYPE_BOOTABLE(filetype));
     bool installable = (FTYPE_INSTALLABLE(filetype));
-    bool agbexportable = (FTPYE_AGBSAVE(filetype));
+    bool agbexportable = (FTPYE_AGBSAVE(filetype) && (drvtype & DRV_VIRTUAL) && (drvtype & DRV_SYSNAND));
     bool agbimportable = (FTPYE_AGBSAVE(filetype) && (drvtype & DRV_VIRTUAL) && (drvtype & DRV_SYSNAND));
     bool special_opt = mountable || verificable || decryptable || encryptable || cia_buildable || cia_buildable_legit || cxi_dumpable || tik_buildable || key_buildable || titleinfo || renamable || transferable || injectable || restorable || xorpadable || ebackupable || ncsdfixable || extrcodeable || keyinitable || bootable || scriptable || installable || agbexportable || agbimportable;
     
@@ -1021,6 +1021,12 @@ u32 FileHandlerMenu(char* current_path, u32* cursor, u32* scroll, PaneData** pan
     else if (user_select == searchdrv) { // -> search drive, open containing path
         char* last_slash = strrchr(curr_entry->path, '/');
         if (last_slash) {
+            if (N_PANES) { // switch to next pane
+                memcpy((*pane)->path, current_path, 256);  // store current pane state
+                (*pane)->cursor = *cursor;
+                (*pane)->scroll = *scroll;
+                if (++*pane >= panedata + N_PANES) *pane -= N_PANES;
+            }
             snprintf(current_path, last_slash - curr_entry->path + 1, "%s", curr_entry->path);
             GetDirContents(current_dir, current_path);
             *cursor = 1;
